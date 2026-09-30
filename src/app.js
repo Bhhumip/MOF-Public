@@ -3,16 +3,17 @@ const { getConfig } = require('./config');
 const { createWebhookHandler } = require('./webhooks');
 const { createShopifyClient } = require('./shopify');
 const { createReturnOrchestrator } = require('./returns');
-const { createRedboxClient } = require('./carriers/redbox');
-const { createAramexClient } = require('./carriers/aramex');
-
+//const { createRedboxClient } = require('./carriers/redbox');
+//const { createAramexClient } = require('./carriers/aramex');
+const { buildCarriers } = require('./carriers/factory');
 function createServer({ config = getConfig() } = {}) {
   const shopify = createShopifyClient(config.shopify);
 
-  const carriers = {
-    redbox: createRedboxClient(config.carriers.redbox),
-    aramex: createAramexClient(config.carriers.aramex)
-  };
+  // const carriers = {
+  //   redbox: createRedboxClient(config.carriers.redbox),
+  //   aramex: createAramexClient(config.carriers.aramex)
+  // };
+  const carriers = buildCarriers(config);
 
   const returns = createReturnOrchestrator({
     shopify,
@@ -64,16 +65,16 @@ function createServer({ config = getConfig() } = {}) {
 }
 
 function start() {
-  const { port } = getConfig();
-  const server = createServer();
-
-  server.listen(port, () => {
-    console.log(`Returns middleware listening on port ${port}`);
+  const config = getConfig();
+  console.log(`Carrier mode: ${config.carrierMode}`);
+  console.log(`RedBox base URL: ${config.carriers.redbox.endpoint || '(not set)'}`);
+  console.log(`Aramex base URL: ${config.carriers.aramex.endpoint || '(not set)'}`);
+  const server = createServer({ config });
+  server.listen(config.port, () => {
+    console.log(`Returns middleware listening on port ${config.port}`);
   });
-
   return server;
 }
-
 if (require.main === module) {
   start();
 }

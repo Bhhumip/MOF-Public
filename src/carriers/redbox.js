@@ -2,8 +2,8 @@
 
 const name = 'redbox';
 
-const DEFAULT_BASE_URL = 'https://api.redboxsa.com';
-const DEFAULT_API_VERSION = 'v3';
+// const DEFAULT_BASE_URL = 'https://api.redboxsa.com';
+// const DEFAULT_API_VERSION = 'v3';
 
 /**
  * Internal, carrier-agnostic event vocabulary. Both adapters normalize into
@@ -63,7 +63,7 @@ function normalizeEvent(raw = {}) {
 
 function createRedboxClient(config = {}) {
   const {
-    endpoint = DEFAULT_BASE_URL,
+    endpoint,//DEFAULT_BASE_URL,
     apiVersion = DEFAULT_API_VERSION,
     bearerToken,
     fetchImpl = globalThis.fetch,
@@ -71,6 +71,8 @@ function createRedboxClient(config = {}) {
     retries = 2,
     retryDelayMs = 300
   } = config;
+
+  if (!endpoint) throw new Error('RedBox client requires an endpoint (use the RedBox sandbox base URL)');
 
   if (typeof fetchImpl !== 'function') {
     throw new Error('RedBox client requires a fetch implementation');
@@ -201,6 +203,6 @@ module.exports = {
   normalizeEvent,
   RedboxApiError,
   STATUS_EVENT_MAP,
-  DEFAULT_BASE_URL,
-  DEFAULT_API_VERSION
+  // DEFAULT_BASE_URL,
+  // DEFAULT_API_VERSION
 };

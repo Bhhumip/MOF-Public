@@ -22,6 +22,28 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion }) {
       }
 
       return payload.data;
+    },
+    async getOrderShipping(orderId) {
+      const query = `
+        query GetOrderShipping($id: ID!) {
+          order(id: $id) {
+            id
+            name
+            shippingLines(first: 10) {
+              nodes {
+                title
+                code
+                source
+                carrierIdentifier
+                requestedFulfillmentService {
+                  serviceName
+                }
+              }
+            }
+          }
+        }
+      `;
+      return this.query(query, { id: orderId });
     }
   };
 }

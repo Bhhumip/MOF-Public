@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/app.js",
     "test": "node --test",
-    "lint": "node --check src/app.js && node --check src/config.js && node --check src/shopify.js && node --check src/webhooks.js && node --check src/returns.js && node --check src/carriers/resolver.js && node --check src/carriers/redbox.js && node --check src/carriers/aramex.js && node --check tests/resolver.test.js && node --check tests/returns.test.js && node --check tests/webhooks.test.js"
+    "lint": "node --check src/app.js && node --check src/config.js && node --check src/shopify.js && node --check src/webhooks.js && node --check src/returns.js && node --check src/carriers/resolver.js && node --check src/carriers/redbox.js && node --check src/carriers/aramex.js && node --check tests/resolver.test.js && node --check tests/returns.test.js && node --check tests/webhooks.test.js && node --check src/carriers/factory.js && node --check tests/config.test.js && node --check tests/factory.test.js"
   },
   "engines": {
     "node": ">=20"

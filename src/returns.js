@@ -46,7 +46,7 @@ function createReturnOrchestrator({
 
     // Write tracking back to Shopify so status stays visible without a
     // second system (§5 step 6).
-    if (shopify) {
+    if (shopify && !booking.dryRun) {
       await shopify.createReverseDeliveryWithShipping({
         reverseFulfillmentOrderId,
         trackingInput: {
@@ -63,7 +63,7 @@ function createReturnOrchestrator({
 
     return {
       carrier: match.carrier,
-      action: 'booked',
+      action: booking.drRun ? 'dry_run' : 'booked',
       matchedOn: match.matchedOn,
       trackingNumber: booking.trackingNumber
     };

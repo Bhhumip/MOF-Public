@@ -10,13 +10,13 @@ test('resolves Aramex from a shipping line code', () => {
   assert.equal(resolveCarrier([{ code: 'ARAMEX' }]), 'aramex');
 });
 
-test('uses deterministic RedBox precedence when both carriers appear', () => {
+test('sends conflicting carriers to manual review', () => {
   assert.equal(
-    resolveCarrier([{ title: 'Aramex' }, { title: 'RedBox' }]),
-    'redbox'
+    resolveCarrier([{ title: 'RedBox Locker' }, { title: 'Aramex Standard' }]),
+    'manual_review'
   );
 });
 
-test('returns null for an unknown carrier', () => {
-  assert.equal(resolveCarrier([{ title: 'Local delivery' }]), null);
+test('falls back to manual review for an unknown carrier', () => {
+  assert.equal(resolveCarrier([{ title: 'Some Other Courier' }]), 'manual_review');
 });

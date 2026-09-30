@@ -4,8 +4,8 @@ const name = 'aramex';
 
 // Aramex's JSON projection of the Shipping Services API. The underlying
 // service is SOAP-shaped; this endpoint accepts the same structure as JSON.
-const DEFAULT_ENDPOINT =
-  'https://ws.aramex.net/shippingapi.v2/shipping/service_1_0.svc/json';
+// const DEFAULT_ENDPOINT =
+//   'https://ws.aramex.net/shippingapi.v2/shipping/service_1_0.svc/json';
 
 /**
  * Aramex reports movement as UpdateCode / UpdateDescription pairs.
@@ -85,7 +85,7 @@ function toParty(party = {}) {
 
 function createAramexClient(config = {}) {
   const {
-    endpoint = DEFAULT_ENDPOINT,
+    endpoint,
     username,
     password,
     version = 'v1',
@@ -99,6 +99,7 @@ function createAramexClient(config = {}) {
     retries = 1,
     retryDelayMs = 500
   } = config;
+  if (!endpoint) throw new Error('RedBox client requires an endpoint (use the RedBox sandbox base URL)');
 
   if (typeof fetchImpl !== 'function') {
     throw new Error('Aramex client requires a fetch implementation');
@@ -260,5 +261,5 @@ module.exports = {
   toParty,
   AramexApiError,
   STATUS_EVENT_MAP,
-  DEFAULT_ENDPOINT
+  //DEFAULT_ENDPOINT
 };
