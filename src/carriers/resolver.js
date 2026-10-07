@@ -119,6 +119,49 @@ function createCarrierResolver({ mapping = DEFAULT_MAPPING } = {}) {
   };
 }
 
+/**
+ * Tag -> carrier lookup. Keys MUST be lowercase and trimmed (tags are
+ * normalised before lookup). A new tag is a new row, not a code change.
+ */
+const DEFAULT_TAG_MAP = Object.freeze({
+  redbox: CARRIER_NAMES.REDBOX,
+  aramex: CARRIER_NAMES.ARAMEX
+});
+
+function normalizeTag(tag) {
+  return String(tag ?? '').normalize('NFKC').trim().toLowerCase();
+}
+
+// GraphQL returns tags as a list; order webhook payloads typically send a
+// comma-separated string. Accept both.
+function toTagList(tags) {
+  if (Array.isArray(tags)) return tags;
+  if (typeof tags === 'string') return tags.split(',');
+  return [];
+}
+
+function resolveCarrierFromTags(tags = [], { tagMap = DEFAULT_TAG_MAP } = {}) {
+  const matchedOn = [];
+
+  for (const raw of toTagList(tags)) {
+    const tag = normalizeTag(raw);
+    // hasOwn avoids matching inherited keys such as "constructor".
+    if (Object.hasOwn(tagMap, tag)) {
+      matchedOn.push({ tag, carrier: tagMap[tag] });
+    }
+  }
+
+  const carriers = new Set(matchedOn.map((match) => match.carrier));
+
+  if (carriers.size === 0) {
+    return { carrier: FALLBACK_CARRIER, reason: 'no_carrier_tag', matchedOn: [] };
+  }
+  if (carriers.size > 1) {
+    return { carrier: FALLBACK_CARRIER, reason: 'conflicting_carrier_tags', matchedOn };
+  }
+  return { carrier: [...carriers][0], reason: 'matched', matchedOn };
+}
+
 module.exports = {
   CARRIER_NAMES,
   FALLBACK_CARRIER,
@@ -127,5 +170,9 @@ module.exports = {
   matchShippingLine,
   resolveCarrier,
   resolveCarrierMatch,
-  createCarrierResolver
+  createCarrierResolver,
+  resolveCarrierFromTags,
+  DEFAULT_TAG_MAP,
+  normalizeTag,
+  toTagList
 };

@@ -1,4 +1,4 @@
-const { resolveCarrierMatch, FALLBACK_CARRIER } = require('./carriers/resolver');
+const { resolveCarrierFromTags, FALLBACK_CARRIER } = require('./carriers/resolver');
 
 /**
  * Resolve the carrier for a return, using the shippingLines tied to the
@@ -6,7 +6,7 @@ const { resolveCarrierMatch, FALLBACK_CARRIER } = require('./carriers/resolver')
  * the reason can be persisted for auditability (§8).
  */
 function resolveReturnCarrier(returnData = {}, options = {}) {
-  return resolveCarrierMatch(returnData.shippingLines || [], options);
+  return resolveCarrierFromTags(returnData.tags, options);
 }
 
 function createReturnOrchestrator({
@@ -15,8 +15,8 @@ function createReturnOrchestrator({
   carriers = {},
   manualReviewQueue = null
 } = {}) {
-  async function resolveAndBook({ returnId, reverseFulfillmentOrderId, shippingLines, lineIds }) {
-    const match = resolve({ shippingLines }, { lineIds });
+  async function resolveAndBook({ returnId, reverseFulfillmentOrderId, tags }) {
+    const match = resolve({ tags });
 
     if (match.carrier === FALLBACK_CARRIER) {
       // §8: never guess. Enqueue for operations rather than booking.
@@ -63,7 +63,7 @@ function createReturnOrchestrator({
 
     return {
       carrier: match.carrier,
-      action: booking.drRun ? 'dry_run' : 'booked',
+      action: booking.dryRun ? 'dry_run' : 'booked',
       matchedOn: match.matchedOn,
       trackingNumber: booking.trackingNumber
     };
@@ -85,12 +85,9 @@ function createReturnOrchestrator({
       const reverseFulfillmentOrderId = payload.reverse_fulfillment_order?.id
         || payload.reverse_fulfillment_order_id;
 
-      // In production, fetch shippingLines + the RFO's line item IDs from
-      // Shopify via GetOrderShipping. Placeholder here.
-      const shippingLines = payload.shipping_lines || [];
-      const lineIds = null;
+      const tags = payload.tags || [];
 
-      return resolveAndBook({ returnId, reverseFulfillmentOrderId, shippingLines, lineIds });
+      return resolveAndBook({ returnId, reverseFulfillmentOrderId, tags });
     },
 
     async onReturnProcessed(payload) {
