@@ -1,0 +1,19 @@
+{
+  "id": "gid://shopify/Order/1001",
+  "name": "#1001",
+  "tags": [
+    "Paytabs",
+    "printed",
+    "RedBox"
+  ],
+  "shippingLines": [
+    {
+      "id": "gid://shopify/ShippingLine/1",
+      "title": "RedBox Locker Pickup",
+      "code": "redbox",
+      "source": "RedBox Rate Provider",
+      "carrierIdentifier": "REDBOX_CARRIER_ID",
+      "custom": false
+    }
+  ]
+}

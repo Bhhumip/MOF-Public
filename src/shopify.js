@@ -1,51 +1,67 @@
-function createShopifyClient({ storeDomain, adminAccessToken, apiVersion }) {
-  const endpoint = `https://${storeDomain}/admin/api/${apiVersion}/graphql.json`;
+'use strict';
 
-  return {
-    endpoint,
-    async query(query, variables = {}) {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': adminAccessToken
-        },
-        body: JSON.stringify({ query, variables })
-      });
-
-      const payload = await response.json();
-
-      if (!response.ok || payload.errors) {
-        const message = payload.errors?.map((error) => error.message).join('; ')
-          || `Shopify Admin GraphQL request failed with status ${response.status}`;
-        throw new Error(message);
-      }
-
-      return payload.data;
-    },
-    async getOrderShipping(orderId) {
-      const query = `
-        query GetOrderShipping($id: ID!) {
-          order(id: $id) {
-            id
-            name
-            shippingLines(first: 10) {
-              nodes {
-                title
-                code
-                source
-                carrierIdentifier
-                requestedFulfillmentService {
-                  serviceName
-                }
-              }
-            }
-          }
+const GET_ORDER_SHIPPING = `
+  query GetOrderShipping($id: ID!) {
+    order(id: $id) {
+      id
+      name
+      tags
+      shippingLines(first: 10) {
+        nodes {
+          id
+          title
+          code
+          source
+          carrierIdentifier
+          custom
         }
-      `;
-      return this.query(query, { id: orderId });
+      }
     }
-  };
+  }
+`;
+
+function toOrderGid(orderId) {
+  const value = String(orderId ?? '').trim();
+  if (!value) throw new Error('An order ID is required');
+  return value.startsWith('gid://') ? value : `gid://shopify/Order/${value}`;
 }
 
-module.exports = { createShopifyClient };
+function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchImpl = globalThis.fetch }) {
+  const endpoint = `https://${storeDomain}/admin/api/${apiVersion}/graphql.json`;
+
+  async function query(document, variables = {}) {
+    const response = await fetchImpl(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': adminAccessToken
+      },
+      body: JSON.stringify({ query: document, variables })
+    });
+
+    const payload = await response.json();
+
+    if (!response.ok || payload.errors) {
+      const message = Array.isArray(payload.errors)
+        ? payload.errors.map((error) => error.message).join('; ')
+        : `Shopify Admin GraphQL request failed with status ${response.status}`;
+      throw new Error(message);
+    }
+    return payload.data;
+  }
+
+  async function getOrderShipping(orderId) {
+    const data = await query(GET_ORDER_SHIPPING, { id: toOrderGid(orderId) });
+    if (!data.order) throw new Error(`Order not found: ${orderId}`);
+    return {
+      id: data.order.id,
+      name: data.order.name,
+      tags: data.order.tags,
+      shippingLines: data.order.shippingLines.nodes
+    };
+  }
+
+  return { endpoint, query, getOrderShipping };
+}
+
+module.exports = { createShopifyClient, toOrderGid, GET_ORDER_SHIPPING };

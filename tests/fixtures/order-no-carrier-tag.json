@@ -1,0 +1,18 @@
+{
+  "id": "gid://shopify/Order/1003",
+  "name": "#1003",
+  "tags": [
+    "Paytabs",
+    "printed"
+  ],
+  "shippingLines": [
+    {
+      "id": "gid://shopify/ShippingLine/2",
+      "title": "Free Shipping +196",
+      "code": "Free Shipping +196",
+      "source": "shopify",
+      "carrierIdentifier": null,
+      "custom": false
+    }
+  ]
+}
