@@ -1,8 +1,7 @@
 const { resolveCarrierFromTags, FALLBACK_CARRIER } = require('./carriers/resolver');
 
 /**
- * Resolve the carrier for a return, using the shippingLines tied to the
- * specific Reverse Fulfillment Order items. Returns a structured match so
+ * resolves the carrier for a return from the original order's tags". Returns a structured match so
  * the reason can be persisted for auditability (§8).
  */
 function resolveReturnCarrier(returnData = {}, options = {}) {
