@@ -1,8 +1,10 @@
 const http = require('node:http');
 const { getConfig } = require('./config');
+const { createSqliteJobStore } = require('./jobs-sqlite');
 const { createWebhookHandler } = require('./webhooks');
 const { createShopifyClient } = require('./shopify');
 const { createReturnOrchestrator } = require('./returns');
+
 //const { createRedboxClient } = require('./carriers/redbox');
 //const { createAramexClient } = require('./carriers/aramex');
 const { buildCarriers } = require('./carriers/factory');
@@ -13,11 +15,13 @@ function createServer({ config = getConfig() } = {}) {
   //   redbox: createRedboxClient(config.carriers.redbox),
   //   aramex: createAramexClient(config.carriers.aramex)
   // };
+  const jobStore = createSqliteJobStore(config.jobDbPath);
   const carriers = buildCarriers(config);
 
   const returns = createReturnOrchestrator({
     shopify,
     carriers,
+    jobStore,
     // manualReviewQueue: ...  // wire to ops queue per §8
   });
 

@@ -44,11 +44,14 @@ function getConfig(env = process.env) {
   return {
     port,
     carrierMode,
+    jobDbPath: env.JOB_DB_PATH || './data/jobs.sqlite',
+
     shopify: {
       storeDomain: env.SHOPIFY_STORE_DOMAIN,
       adminAccessToken: env.SHOPIFY_ADMIN_ACCESS_TOKEN,
       apiVersion: env.SHOPIFY_API_VERSION || '2026-01',
       webhookSecret: env.SHOPIFY_WEBHOOK_SECRET,
+
       // Topics the middleware subscribes to. returns/request fires when a
       // customer initiates a return; returns/approve fires when the merchant
       // approves and the Reverse Fulfillment Order is created.

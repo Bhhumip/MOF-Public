@@ -20,6 +20,18 @@ const GET_ORDER_SHIPPING = `
   }
 `;
 
+
+const GET_RETURN_CONTEXT = `
+  query GetReturnContext($id: ID!) {
+    return(id: $id) {
+      id
+      status
+      order { id name tags }
+      reverseFulfillmentOrders(first: 10) { nodes { id status } }
+    }
+  }
+`;
+
 function toOrderGid(orderId) {
   const value = String(orderId ?? '').trim();
   if (!value) throw new Error('An order ID is required');
@@ -61,7 +73,25 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
     };
   }
 
-  return { endpoint, query, getOrderShipping };
+
+  async function getReturnContext(returnId) {
+    const id = String(returnId ?? '').trim();
+    if (!id) throw new Error('A return ID is required');
+    const data = await query(GET_RETURN_CONTEXT, { id });
+    if (!data.return) return null; // not found, or not readable by this app
+    return {
+      returnId: data.return.id,
+      status: data.return.status,
+      order: {
+        id: data.return.order.id,
+        name: data.return.order.name,
+        tags: data.return.order.tags
+      },
+      reverseFulfillmentOrders: data.return.reverseFulfillmentOrders.nodes
+    };
+  }
+  return { endpoint, query, getOrderShipping, getReturnContext };
+
 }
 
 module.exports = { createShopifyClient, toOrderGid, GET_ORDER_SHIPPING };

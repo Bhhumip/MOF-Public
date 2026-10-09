@@ -1,9 +1,9 @@
-const { resolveCarrierFromTags, FALLBACK_CARRIER } = require('./carriers/resolver');
+'use strict';
 
-/**
- * resolves the carrier for a return from the original order's tags". Returns a structured match so
- * the reason can be persisted for auditability (§8).
- */
+const { resolveCarrierFromTags, FALLBACK_CARRIER } = require('./carriers/resolver');
+const { createMemoryJobStore } = require('./jobs');
+
+/** Resolve the carrier for a return from the original order's tags. */
 function resolveReturnCarrier(returnData = {}, options = {}) {
   return resolveCarrierFromTags(returnData.tags, options);
 }
@@ -12,97 +12,138 @@ function createReturnOrchestrator({
   resolve = resolveReturnCarrier,
   shopify = null,
   carriers = {},
-  manualReviewQueue = null
+  manualReviewQueue = null,
+  jobStore = createMemoryJobStore()
 } = {}) {
-  async function resolveAndBook({ returnId, reverseFulfillmentOrderId, tags }) {
-    const match = resolve({ tags });
+  async function enqueueForReview(record) {
+    if (manualReviewQueue) await manualReviewQueue.enqueue(record);
+    return { carrier: FALLBACK_CARRIER, action: 'manual_review', ...record };
+  }
+
+  async function processReverseFulfillmentOrder({ returnId, reverseFulfillmentOrderId, order }) {
+    // Idempotency: claim BEFORE booking so a redelivered webhook cannot double-book (§8).
+    const key = `rfo:${reverseFulfillmentOrderId}`;
+    const claim = await jobStore.claim(key, {
+      returnId,
+      reverseFulfillmentOrderId,
+      orderId: order.id,
+      orderName: order.name
+    });
+    if (!claim.claimed) {
+      console.log(`[duplicate] RFO already processed: ${key}`);
+      return { action: 'duplicate', reverseFulfillmentOrderId, status: claim.job.status };
+    }
+
+    const match = resolve({ tags: order.tags });
+    await jobStore.update(key, {
+      carrier: match.carrier,
+      reason: match.reason,
+      matchedTags: match.matchedOn.map((entry) => entry.tag)
+    });
 
     if (match.carrier === FALLBACK_CARRIER) {
-      // §8: never guess. Enqueue for operations rather than booking.
-      const record = {
+      await jobStore.update(key, { status: 'manual_review' });
+      return enqueueForReview({
         returnId,
         reverseFulfillmentOrderId,
         reason: match.reason,
-        matchedOn: match.matchedOn
-      };
-      if (manualReviewQueue) {
-        await manualReviewQueue.enqueue(record);
-      }
-      return { carrier: FALLBACK_CARRIER, action: 'manual_review', ...record };
+        matchedOn: match.matchedOn,
+        tags: order.tags
+      });
     }
 
     const adapter = carriers[match.carrier];
     if (!adapter) {
-      throw new Error(`No carrier adapter registered for "${match.carrier}"`);
+      const message = `No carrier adapter registered for "${match.carrier}"`;
+      await jobStore.update(key, { status: 'failed', error: message });
+      throw new Error(message);
     }
 
-    // Idempotency: key on the Reverse Fulfillment Order ID so a redelivered
-    // webhook cannot double-book (§8).
-    const booking = await adapter.createReturnShipment(
-      { returnId, reverseFulfillmentOrderId },
-      { idempotencyKey: `rfo:${reverseFulfillmentOrderId}` }
-    );
+    try {
+      const booking = await adapter.createReturnShipment(
+        { returnId, reverseFulfillmentOrderId },
+        { idempotencyKey: key }
+      );
 
-    // Write tracking back to Shopify so status stays visible without a
-    // second system (§5 step 6).
-    if (shopify && !booking.dryRun) {
-      await shopify.createReverseDeliveryWithShipping({
+      // A dry-run booking has a fake tracking number: never write it to Shopify.
+      if (shopify && !booking.dryRun) {
+        await shopify.createReverseDeliveryWithShipping({
+          reverseFulfillmentOrderId,
+          trackingInput: {
+            number: booking.trackingNumber,
+            company: adapter.name,
+            url: booking.trackingUrl || null
+          },
+          labelInput: booking.label
+            ? { fileUrl: booking.label.url, fileName: booking.label.fileName }
+            : null,
+          notifyCustomer: true
+        });
+      }
+
+      const action = booking.dryRun ? 'dry_run' : 'booked';
+      await jobStore.update(key, { status: action, trackingNumber: booking.trackingNumber });
+      return {
+        carrier: match.carrier,
+        action,
         reverseFulfillmentOrderId,
-        trackingInput: {
-          number: booking.trackingNumber,
-          company: adapter.name,
-          url: booking.trackingUrl || null
-        },
-        labelInput: booking.label
-          ? { fileUrl: booking.label.url, fileName: booking.label.fileName }
-          : null,
-        notifyCustomer: true
-      });
+        matchedOn: match.matchedOn,
+        trackingNumber: booking.trackingNumber
+      };
+    } catch (error) {
+      await jobStore.update(key, { status: 'failed', error: error.message });
+      throw error;
     }
-
-    return {
-      carrier: match.carrier,
-      action: booking.dryRun ? 'dry_run' : 'booked',
-      matchedOn: match.matchedOn,
-      trackingNumber: booking.trackingNumber
-    };
   }
 
   return {
-    // --- Webhook-driven entry points ---
-
     async onReturnRequested(payload) {
-      // A return is REQUESTED. Nothing to book yet — the merchant must
-      // approve first. Log for observability.
-      return { status: 'observed', returnId: payload.id };
+      return { status: 'observed', returnId: payload.admin_graphql_api_id || payload.id };
     },
 
+    // The approve payload carries the Return ID and Order ID only. Everything
+    // else (RFO ids, order tags) is fetched from Shopify.
     async onReturnApproved(payload) {
-      // Reverse Fulfillment Order now exists. This is the trigger to
-      // resolve the carrier and book the return leg (§5 step 2-5).
-      const returnId = payload.admin_graphql_api_id || payload.id;
-      const reverseFulfillmentOrderId = payload.reverse_fulfillment_order?.id
-        || payload.reverse_fulfillment_order_id;
+      const returnId = payload.admin_graphql_api_id;
+      if (!returnId) throw new Error('returns/approve payload has no admin_graphql_api_id');
+      if (!shopify) throw new Error('A Shopify client is required to fetch the return');
 
-      const tags = payload.tags || [];
+      const context = await shopify.getReturnContext(returnId);
+      if (!context) {
+        return {
+          returnId,
+          results: [await enqueueForReview({ returnId, reason: 'order_not_accessible', matchedOn: [] })]
+        };
+      }
+      if (context.reverseFulfillmentOrders.length === 0) {
+        return {
+          returnId,
+          results: [await enqueueForReview({ returnId, reason: 'no_reverse_fulfillment_order', matchedOn: [] })]
+        };
+      }
 
-      return resolveAndBook({ returnId, reverseFulfillmentOrderId, tags });
+      const results = [];
+      for (const rfo of context.reverseFulfillmentOrders) {
+        results.push(
+          await processReverseFulfillmentOrder({
+            returnId,
+            reverseFulfillmentOrderId: rfo.id,
+            order: context.order
+          })
+        );
+      }
+      return { returnId, results };
     },
 
     async onReturnProcessed(payload) {
-      // Disposition (restock/dispose) and refund recorded. The carrier
-      // booking should already exist; this is for status reconciliation.
-      return { status: 'processed', returnId: payload.id };
+      return { status: 'processed', returnId: payload.admin_graphql_api_id || payload.id };
     },
 
     async onReverseFulfillmentOrderDisposed(payload) {
-      // §5 step 7: carrier reported delivery/disposition. Update the
-      // Reverse Delivery in Shopify if needed.
       return { status: 'disposed', reverseFulfillmentOrderId: payload.id };
     },
 
-    // --- Direct HTTP entry point (kept for manual/testing use) ---
-
+    // Direct HTTP entry point (kept for manual/testing use).
     async handle(returnData) {
       const match = resolve(returnData);
       return { carrier: match.carrier, reason: match.reason };

@@ -2,102 +2,171 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createReturnOrchestrator, resolveReturnCarrier } = require('../src/returns');
 
-test('return orchestration delegates carrier selection to the resolver', () => {
+const approvedPayload = {
+  admin_graphql_api_id: 'gid://shopify/Return/1',
+  order: { admin_graphql_api_id: 'gid://shopify/Order/9' }
+};
+
+function fakeShopify({ tags, rfoIds = ['gid://shopify/ReverseFulfillmentOrder/5'], missing = false } = {}) {
+  const written = [];
+  return {
+    written,
+    async getReturnContext(returnId) {
+      if (missing) return null;
+      return {
+        returnId,
+        status: 'OPEN',
+        order: { id: 'gid://shopify/Order/9', name: '#1090', tags },
+        reverseFulfillmentOrders: rfoIds.map((id) => ({ id, status: 'OPEN' }))
+      };
+    },
+    async createReverseDeliveryWithShipping(input) { written.push(input); }
+  };
+}
+
+function fakeCarrier(name, { dryRun = false } = {}) {
+  const calls = [];
+  return {
+    name,
+    calls,
+    async createReturnShipment(payload, options) {
+      calls.push({ payload, options });
+      return dryRun ? { dryRun: true, trackingNumber: 'DRYRUN-1' } : { trackingNumber: 'TRK1', trackingUrl: null };
+    }
+  };
+}
+
+test('resolveReturnCarrier uses the order tags', () => {
   const match = resolveReturnCarrier({ tags: ['aramex', 'printed'] });
   assert.equal(match.carrier, 'aramex');
   assert.equal(match.reason, 'matched');
 });
 
-test('return orchestrator returns the resolved carrier without calling an adapter', async () => {
+test('handle returns the resolved carrier without calling an adapter', async () => {
   const orchestrator = createReturnOrchestrator();
   const result = await orchestrator.handle({ tags: ['Paytabs', 'RedBox'] });
   assert.equal(result.carrier, 'redbox');
   assert.equal(result.reason, 'matched');
 });
 
-test('onReturnApproved books with the carrier chosen by tags', async () => {
-  const calls = [];
-  const carriers = {
-    redbox: {
-      name: 'redbox',
-      async createReturnShipment(payload, options) {
-        calls.push({ payload, options });
-        return { dryRun: true, trackingNumber: 'T1' };
-      }
-    }
-  };
-  const orchestrator = createReturnOrchestrator({ carriers });
+test('approve fetches the return, resolves by tag and books with an idempotency key', async () => {
+  const redbox = fakeCarrier('redbox');
+  const shopify = fakeShopify({ tags: ['Paytabs', 'RedBox'] });
+  const orchestrator = createReturnOrchestrator({ shopify, carriers: { redbox } });
 
-  const result = await orchestrator.onReturnApproved({
-    id: 'r1',
-    reverse_fulfillment_order_id: 'rfo1',
-    tags: ['RedBox']
-  });
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
 
-  assert.equal(result.carrier, 'redbox');
-  assert.equal(result.action, 'dry_run');
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].options.idempotencyKey, 'rfo:rfo1');
+  assert.equal(results[0].carrier, 'redbox');
+  assert.equal(results[0].action, 'booked');
+  assert.equal(redbox.calls[0].options.idempotencyKey, 'rfo:gid://shopify/ReverseFulfillmentOrder/5');
+  assert.equal(shopify.written.length, 1);
+  assert.equal(shopify.written[0].trackingInput.number, 'TRK1');
+  assert.equal(shopify.written[0].trackingInput.company, 'redbox');
 });
 
-test('onReturnApproved queues a return with no carrier tag and books nothing', async () => {
-  const queued = [];
+test('a dry-run booking is never written back to Shopify', async () => {
+  const aramex = fakeCarrier('aramex', { dryRun: true });
+  const shopify = fakeShopify({ tags: ['aramex'] });
+  const orchestrator = createReturnOrchestrator({ shopify, carriers: { aramex } });
+
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
+
+  assert.equal(results[0].action, 'dry_run');
+  assert.equal(shopify.written.length, 0);
+});
+
+test('the same approve webhook twice books only once', async () => {
+  const redbox = fakeCarrier('redbox');
   const orchestrator = createReturnOrchestrator({
-    carriers: {},
+    shopify: fakeShopify({ tags: ['RedBox'] }),
+    carriers: { redbox }
+  });
+
+  const first = await orchestrator.onReturnApproved(approvedPayload);
+  const second = await orchestrator.onReturnApproved(approvedPayload);
+
+  assert.equal(first.results[0].action, 'booked');
+  assert.equal(second.results[0].action, 'duplicate');
+  assert.equal(redbox.calls.length, 1);
+});
+
+test('two simultaneous approve webhooks book only once', async () => {
+  const redbox = fakeCarrier('redbox');
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['RedBox'] }),
+    carriers: { redbox }
+  });
+
+  await Promise.all([
+    orchestrator.onReturnApproved(approvedPayload),
+    orchestrator.onReturnApproved(approvedPayload)
+  ]);
+
+  assert.equal(redbox.calls.length, 1);
+});
+
+test('no carrier tag goes to the review queue and books nothing', async () => {
+  const queued = [];
+  const redbox = fakeCarrier('redbox');
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['Paytabs', 'printed'] }),
+    carriers: { redbox },
     manualReviewQueue: { async enqueue(record) { queued.push(record); } }
   });
 
-  const result = await orchestrator.onReturnApproved({
-    id: 'r2',
-    reverse_fulfillment_order_id: 'rfo2',
-    tags: ['Paytabs', 'printed']
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
+
+  assert.equal(results[0].action, 'manual_review');
+  assert.equal(results[0].reason, 'no_carrier_tag');
+  assert.equal(queued.length, 1);
+  assert.equal(redbox.calls.length, 0);
+});
+
+test('both carrier tags go to manual review', async () => {
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['RedBox', 'aramex'] }),
+    carriers: { redbox: fakeCarrier('redbox'), aramex: fakeCarrier('aramex') }
+  });
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
+  assert.equal(results[0].reason, 'conflicting_carrier_tags');
+});
+
+test('an unreadable return goes to manual review as order_not_accessible', async () => {
+  const queued = [];
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ missing: true }),
+    manualReviewQueue: { async enqueue(record) { queued.push(record); } }
   });
 
-  assert.equal(result.action, 'manual_review');
-  assert.equal(result.reason, 'no_carrier_tag');
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
+
+  assert.equal(results[0].reason, 'order_not_accessible');
   assert.equal(queued.length, 1);
 });
-test('a dry-run booking is never written back to Shopify', async () => {
-  let shopifyCalled = false;
-  const shopify = {
-    async createReverseDeliveryWithShipping() { shopifyCalled = true; }
-  };
-  const carriers = {
-    aramex: {
-      name: 'aramex',
-      async createReturnShipment() { return { dryRun: true, trackingNumber: 'DRYRUN-1' }; }
-    }
-  };
-  const orchestrator = createReturnOrchestrator({ shopify, carriers });
 
-  const result = await orchestrator.onReturnApproved({
-    id: 'r3', reverse_fulfillment_order_id: 'rfo3', tags: ['aramex']
+test('each reverse fulfillment order is booked separately', async () => {
+  const redbox = fakeCarrier('redbox');
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['RedBox'], rfoIds: ['gid://shopify/ReverseFulfillmentOrder/5', 'gid://shopify/ReverseFulfillmentOrder/6'] }),
+    carriers: { redbox }
   });
 
-  assert.equal(result.action, 'dry_run');
-  assert.equal(shopifyCalled, false);
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
+
+  assert.equal(results.length, 2);
+  assert.equal(redbox.calls.length, 2);
 });
 
-test('a real booking is written back to Shopify with its tracking number', async () => {
-  const written = [];
-  const shopify = {
-    async createReverseDeliveryWithShipping(input) { written.push(input); }
-  };
-  const carriers = {
-    redbox: {
-      name: 'redbox',
-      async createReturnShipment() { return { trackingNumber: 'TRK1', trackingUrl: null }; }
-    }
-  };
-  const orchestrator = createReturnOrchestrator({ shopify, carriers });
-
-  const result = await orchestrator.onReturnApproved({
-    id: 'r4', reverse_fulfillment_order_id: 'rfo4', tags: ['RedBox']
+test('a failed booking marks the job failed and rethrows', async () => {
+  const broken = { name: 'redbox', async createReturnShipment() { throw new Error('carrier down'); } };
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['RedBox'] }),
+    carriers: { redbox: broken }
   });
+  await assert.rejects(() => orchestrator.onReturnApproved(approvedPayload), /carrier down/);
+});
 
-  assert.equal(result.action, 'booked');
-  assert.equal(written.length, 1);
-  assert.equal(written[0].reverseFulfillmentOrderId, 'rfo4');
-  assert.equal(written[0].trackingInput.number, 'TRK1');
-  assert.equal(written[0].trackingInput.company, 'redbox');
+test('a payload without a return id is rejected', async () => {
+  const orchestrator = createReturnOrchestrator({ shopify: fakeShopify({ tags: [] }) });
+  await assert.rejects(() => orchestrator.onReturnApproved({}), /admin_graphql_api_id/);
 });

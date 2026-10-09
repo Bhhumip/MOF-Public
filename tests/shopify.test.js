@@ -38,3 +38,29 @@ test('getOrderShipping throws the GraphQL error message', async () => {
     const { client } = clientReturning({ errors: [{ message: 'Access denied for order field.' }] });
     await assert.rejects(() => client.getOrderShipping('1'), /Access denied/);
 });
+
+test('getReturnContext returns the return, order tags and RFO ids', async () => {
+    const { client, calls } = clientReturning({
+        data: {
+            return: {
+                id: 'gid://shopify/Return/1', status: 'OPEN',
+                order: { id: 'gid://shopify/Order/9', name: '#1090', tags: ['aramex'] },
+                reverseFulfillmentOrders: { nodes: [{ id: 'gid://shopify/ReverseFulfillmentOrder/5', status: 'OPEN' }] }
+            }
+        }
+    });
+    const result = await client.getReturnContext('gid://shopify/Return/1');
+    assert.equal(calls[0].variables.id, 'gid://shopify/Return/1');
+    assert.deepEqual(result.order.tags, ['aramex']);
+    assert.equal(result.reverseFulfillmentOrders[0].id, 'gid://shopify/ReverseFulfillmentOrder/5');
+});
+
+test('getReturnContext returns null when the return cannot be read', async () => {
+    const { client } = clientReturning({ data: { return: null } });
+    assert.equal(await client.getReturnContext('gid://shopify/Return/404'), null);
+});
+
+test('getReturnContext requires an id', async () => {
+    const { client } = clientReturning({ data: {} });
+    await assert.rejects(() => client.getReturnContext(''), /return ID is required/);
+});
