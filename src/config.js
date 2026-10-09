@@ -31,7 +31,10 @@ function getConfig(env = process.env) {
     'SHOPIFY_WEBHOOK_SECRET'
   ];
   const missingVariables = requiredVariables.filter((name) => !env[name]);
-
+  const defaultItemWeightKg = env.DEFAULT_ITEM_WEIGHT_KG ? Number(env.DEFAULT_ITEM_WEIGHT_KG) : null;
+  if (defaultItemWeightKg !== null && !(defaultItemWeightKg > 0)) {
+    throw new Error('DEFAULT_ITEM_WEIGHT_KG must be a number greater than 0');
+  }
   if (missingVariables.length > 0) {
     throw new Error(`Missing required environment variables: ${missingVariables.join(', ')}`);
   }
@@ -44,12 +47,13 @@ function getConfig(env = process.env) {
   return {
     port,
     carrierMode,
+    defaultItemWeightKg,
     jobDbPath: env.JOB_DB_PATH || './data/jobs.sqlite',
 
     shopify: {
       storeDomain: env.SHOPIFY_STORE_DOMAIN,
       adminAccessToken: env.SHOPIFY_ADMIN_ACCESS_TOKEN,
-      apiVersion: env.SHOPIFY_API_VERSION || '2026-01',
+      apiVersion: env.SHOPIFY_API_VERSION || '2026-07',
       webhookSecret: env.SHOPIFY_WEBHOOK_SECRET,
 
       // Topics the middleware subscribes to. returns/request fires when a

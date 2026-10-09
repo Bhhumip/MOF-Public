@@ -66,6 +66,10 @@ function createReturnOrchestrator({
       const details = await shopify.getReturnShipmentDetails(returnId);
       if (!details) throw new ReturnShipmentError('details_not_accessible');
       returnShipment = buildReturnShipment({ returnId, reverseFulfillmentOrderId, details, defaultItemWeightKg });
+
+      if (returnShipment.weightEstimated) {
+        await jobStore.update(key, { weightEstimated: true });
+      }
     } catch (error) {
       if (error instanceof ReturnShipmentError) {
         await jobStore.update(key, { status: 'manual_review', reason: error.code });
@@ -74,6 +78,7 @@ function createReturnOrchestrator({
       await jobStore.update(key, { status: 'failed', error: error.message });
       throw error;
     }
+
 
 
     try {

@@ -87,3 +87,35 @@ test('an RFO with no items is rejected', () => {
         (error) => error.code === 'no_return_items'
     );
 });
+
+
+const items = (list) => ({ reverseFulfillmentOrders: [{ id: RFO, lineItems: list }] });
+
+test('weight is real item weights times quantity, converted to kg', () => {
+    const details = makeDetails(items([
+        { lineItemId: 'gid://shopify/LineItem/4', sku: 'S1', name: 'Top', quantity: 2, weight: { unit: 'GRAMS', value: 400 } },
+        { lineItemId: 'gid://shopify/LineItem/6', sku: 'S2', name: 'Pants', quantity: 1, weight: { unit: 'POUNDS', value: 1 } }
+    ]));
+    const shipment = buildReturnShipment({ returnId: 'r', reverseFulfillmentOrderId: RFO, details });
+    assert.deepEqual(shipment.weight, { value: 1.254, unit: 'KG' }); // 0.8 + 0.45359... kg
+    assert.equal(shipment.weightEstimated, false);
+});
+
+test('an item without a weight makes the total unknown when no default exists', () => {
+    const details = makeDetails(items([
+        { lineItemId: 'gid://shopify/LineItem/4', sku: 'S1', name: 'Top', quantity: 1, weight: null },
+        { lineItemId: 'gid://shopify/LineItem/6', sku: 'S2', name: 'Pants', quantity: 1, weight: { unit: 'KILOGRAMS', value: 1 } }
+    ]));
+    const shipment = buildReturnShipment({ returnId: 'r', reverseFulfillmentOrderId: RFO, details });
+    assert.equal(shipment.weight, null);
+});
+
+test('the configured default fills in only the items with no weight', () => {
+    const details = makeDetails(items([
+        { lineItemId: 'gid://shopify/LineItem/4', sku: 'S1', name: 'Top', quantity: 2, weight: null },
+        { lineItemId: 'gid://shopify/LineItem/6', sku: 'S2', name: 'Pants', quantity: 1, weight: { unit: 'KILOGRAMS', value: 1 } }
+    ]));
+    const shipment = buildReturnShipment({ returnId: 'r', reverseFulfillmentOrderId: RFO, details, defaultItemWeightKg: 1 });
+    assert.deepEqual(shipment.weight, { value: 3, unit: 'KG' }); // 2 x 1 + 1
+    assert.equal(shipment.weightEstimated, true);
+});

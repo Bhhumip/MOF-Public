@@ -20,6 +20,37 @@ function toAddress(source) {
     };
 }
 
+const KG_PER_UNIT = Object.freeze({
+    GRAMS: 0.001,
+    KILOGRAMS: 1,
+    OUNCES: 0.028349523125,
+    POUNDS: 0.45359237
+});
+
+// Weight of ONE unit in kilograms, or null when unknown (missing, zero or an unknown unit).
+function toKilograms(weight) {
+    if (!weight || !(weight.value > 0)) return null;
+    const factor = KG_PER_UNIT[weight.unit];
+    return factor ? weight.value * factor : null;
+}
+
+// Real item weights times quantity. An item without a weight uses the configured
+// default; with no default the whole total is unknown (null) rather than guessed.
+function totalWeightKg(items, defaultItemWeightKg) {
+    let total = 0;
+    let estimated = false;
+    for (const item of items) {
+        let unitKg = toKilograms(item.weight);
+        if (unitKg == null) {
+            if (defaultItemWeightKg == null) return { kg: null, estimated: false };
+            unitKg = defaultItemWeightKg;
+            estimated = true;
+        }
+        total += unitKg * item.quantity;
+    }
+    return { kg: Math.max(Number(total.toFixed(3)), 0.001), estimated };
+}
+
 /**
  * Build the carrier-neutral object every adapter receives.
  * Throws ReturnShipmentError (with a code) when something every carrier
@@ -44,7 +75,8 @@ function buildReturnShipment({ returnId, reverseFulfillmentOrderId, details, def
 
     const order = details.order;
     const shipping = order.shippingAddress;
-    const totalQuantity = rfo.lineItems.reduce((sum, item) => sum + item.quantity, 0);
+    const { kg, estimated } = totalWeightKg(rfo.lineItems, defaultItemWeightKg);
+
 
     return {
         returnId,
@@ -63,10 +95,8 @@ function buildReturnShipment({ returnId, reverseFulfillmentOrderId, details, def
             address: toAddress(location)
         },
         items: rfo.lineItems.map((item) => ({ sku: item.sku, name: item.name, quantity: item.quantity })),
-        weight: defaultItemWeightKg == null
-            ? null
-            : { value: Number((defaultItemWeightKg * totalQuantity).toFixed(3)), unit: 'KG' },
-        description: `Return for order ${order.name}`
+        weight: kg == null ? null : { value: kg, unit: 'KG' },
+        weightEstimated: estimated,
     };
 }
 

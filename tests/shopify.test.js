@@ -83,7 +83,7 @@ test('getReturnShipmentDetails reshapes the return into a simple structure', asy
                 reverseFulfillmentOrders: {
                     nodes: [{
                         id: 'gid://shopify/ReverseFulfillmentOrder/5',
-                        lineItems: { nodes: [{ totalQuantity: 2, fulfillmentLineItem: { lineItem: { id: 'gid://shopify/LineItem/4', sku: 'SKU1', name: 'Scrub Top' } } }] }
+                        lineItems: { nodes: [{ totalQuantity: 2, fulfillmentLineItem: { lineItem: { id: 'gid://shopify/LineItem/4', sku: 'SKU1', name: 'Scrub Top', weight: { unit: 'GRAMS', value: 400 } } } }] }
                     }]
                 }
             }
@@ -93,6 +93,7 @@ test('getReturnShipmentDetails reshapes the return into a simple structure', asy
     assert.deepEqual(details.order.fulfillmentOrders[0].lineItemIds, ['gid://shopify/LineItem/4']);
     assert.equal(details.reverseFulfillmentOrders[0].lineItems[0].quantity, 2);
     assert.equal(details.reverseFulfillmentOrders[0].lineItems[0].sku, 'SKU1');
+    assert.deepEqual(details.reverseFulfillmentOrders[0].lineItems[0].weight, { unit: 'GRAMS', value: 400 });
 });
 
 test('getReturnShipmentDetails returns null when the return cannot be read', async () => {

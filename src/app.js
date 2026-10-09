@@ -22,6 +22,7 @@ function createServer({ config = getConfig() } = {}) {
     shopify,
     carriers,
     jobStore,
+    defaultItemWeightKg: config.defaultItemWeightKg
     // manualReviewQueue: ...  // wire to ops queue per §8
   });
 

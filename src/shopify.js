@@ -54,7 +54,7 @@ const GET_RETURN_SHIPMENT_DETAILS = `
         nodes {
           id
           lineItems(first: 50) {
-            nodes { totalQuantity fulfillmentLineItem { lineItem { id sku name } } }
+            nodes { totalQuantity fulfillmentLineItem { lineItem { id sku name  weight { unit value }} } }
           }
         }
       }
@@ -150,7 +150,8 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
           lineItemId: item.fulfillmentLineItem?.lineItem?.id ?? null,
           sku: item.fulfillmentLineItem?.lineItem?.sku ?? null,
           name: item.fulfillmentLineItem?.lineItem?.name ?? '',
-          quantity: item.totalQuantity
+          quantity: item.totalQuantity,
+          weight: item.fulfillmentLineItem?.lineItem?.weight ?? null
         }))
       }))
     };
