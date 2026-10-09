@@ -64,3 +64,38 @@ test('getReturnContext requires an id', async () => {
     const { client } = clientReturning({ data: {} });
     await assert.rejects(() => client.getReturnContext(''), /return ID is required/);
 });
+test('getReturnShipmentDetails reshapes the return into a simple structure', async () => {
+    const { client } = clientReturning({
+        data: {
+            return: {
+                id: 'gid://shopify/Return/1',
+                order: {
+                    id: 'gid://shopify/Order/9', name: '#1090', email: 'a@example.com', phone: null,
+                    shippingAddress: { name: 'Test Customer', company: null, address1: '1 Test St', address2: null, city: 'Riyadh', province: null, zip: '11111', countryCodeV2: 'SA', phone: null },
+                    fulfillmentOrders: {
+                        nodes: [{
+                            id: 'gid://shopify/FulfillmentOrder/2',
+                            assignedLocation: { name: 'Warehouse A', address1: '2 Depot Rd', address2: null, city: 'Jeddah', province: null, zip: '21000', countryCode: 'SA', phone: null },
+                            lineItems: { nodes: [{ lineItem: { id: 'gid://shopify/LineItem/4' } }] }
+                        }]
+                    }
+                },
+                reverseFulfillmentOrders: {
+                    nodes: [{
+                        id: 'gid://shopify/ReverseFulfillmentOrder/5',
+                        lineItems: { nodes: [{ totalQuantity: 2, fulfillmentLineItem: { lineItem: { id: 'gid://shopify/LineItem/4', sku: 'SKU1', name: 'Scrub Top' } } }] }
+                    }]
+                }
+            }
+        }
+    });
+    const details = await client.getReturnShipmentDetails('gid://shopify/Return/1');
+    assert.deepEqual(details.order.fulfillmentOrders[0].lineItemIds, ['gid://shopify/LineItem/4']);
+    assert.equal(details.reverseFulfillmentOrders[0].lineItems[0].quantity, 2);
+    assert.equal(details.reverseFulfillmentOrders[0].lineItems[0].sku, 'SKU1');
+});
+
+test('getReturnShipmentDetails returns null when the return cannot be read', async () => {
+    const { client } = clientReturning({ data: { return: null } });
+    assert.equal(await client.getReturnShipmentDetails('gid://shopify/Return/404'), null);
+});

@@ -2,12 +2,57 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createReturnOrchestrator, resolveReturnCarrier } = require('../src/returns');
 
+const DEFAULT_RFO = 'gid://shopify/ReverseFulfillmentOrder/5';
+
 const approvedPayload = {
   admin_graphql_api_id: 'gid://shopify/Return/1',
   order: { admin_graphql_api_id: 'gid://shopify/Order/9' }
 };
 
-function fakeShopify({ tags, rfoIds = ['gid://shopify/ReverseFulfillmentOrder/5'], missing = false } = {}) {
+// Details shaped like what shopify.getReturnShipmentDetails() returns.
+// Each RFO gets one line item, and the fulfillment order holds all of them.
+function makeDetails(rfoIds, { noWarehouse = false } = {}) {
+  return {
+    returnId: 'gid://shopify/Return/1',
+    order: {
+      id: 'gid://shopify/Order/9',
+      name: '#1090',
+      email: 'customer@example.com',
+      phone: null,
+      shippingAddress: {
+        name: 'Test Customer', company: null, address1: '1 Test St', address2: null,
+        city: 'Riyadh', province: null, zip: '11111', countryCodeV2: 'SA', phone: '0500000000'
+      },
+      fulfillmentOrders: [{
+        id: 'gid://shopify/FulfillmentOrder/2',
+        assignedLocation: {
+          name: 'Warehouse A', address1: '2 Depot Rd', address2: null, city: 'Jeddah',
+          province: null, zip: '21000', countryCode: 'SA', phone: null
+        },
+        lineItemIds: noWarehouse
+          ? ['gid://shopify/LineItem/999']
+          : rfoIds.map((_, index) => `gid://shopify/LineItem/${index + 4}`)
+      }]
+    },
+    reverseFulfillmentOrders: rfoIds.map((id, index) => ({
+      id,
+      lineItems: [{
+        lineItemId: `gid://shopify/LineItem/${index + 4}`,
+        sku: `SKU${index + 1}`,
+        name: 'Scrub Top',
+        quantity: 1
+      }]
+    }))
+  };
+}
+
+function fakeShopify({
+  tags,
+  rfoIds = [DEFAULT_RFO],
+  missing = false,
+  noWarehouse = false,
+  detailsMissing = false
+} = {}) {
   const written = [];
   return {
     written,
@@ -20,7 +65,13 @@ function fakeShopify({ tags, rfoIds = ['gid://shopify/ReverseFulfillmentOrder/5'
         reverseFulfillmentOrders: rfoIds.map((id) => ({ id, status: 'OPEN' }))
       };
     },
-    async createReverseDeliveryWithShipping(input) { written.push(input); }
+    async getReturnShipmentDetails() {
+      if (detailsMissing) return null;
+      return makeDetails(rfoIds, { noWarehouse });
+    },
+    async createReverseDeliveryWithShipping(input) {
+      written.push(input);
+    }
   };
 }
 
@@ -31,7 +82,9 @@ function fakeCarrier(name, { dryRun = false } = {}) {
     calls,
     async createReturnShipment(payload, options) {
       calls.push({ payload, options });
-      return dryRun ? { dryRun: true, trackingNumber: 'DRYRUN-1' } : { trackingNumber: 'TRK1', trackingUrl: null };
+      return dryRun
+        ? { dryRun: true, trackingNumber: 'DRYRUN-1' }
+        : { trackingNumber: 'TRK1', trackingUrl: null };
     }
   };
 }
@@ -58,10 +111,27 @@ test('approve fetches the return, resolves by tag and books with an idempotency 
 
   assert.equal(results[0].carrier, 'redbox');
   assert.equal(results[0].action, 'booked');
-  assert.equal(redbox.calls[0].options.idempotencyKey, 'rfo:gid://shopify/ReverseFulfillmentOrder/5');
+  assert.equal(redbox.calls[0].options.idempotencyKey, `rfo:${DEFAULT_RFO}`);
   assert.equal(shopify.written.length, 1);
   assert.equal(shopify.written[0].trackingInput.number, 'TRK1');
   assert.equal(shopify.written[0].trackingInput.company, 'redbox');
+});
+
+test('the adapter receives the neutral returnShipment', async () => {
+  const redbox = fakeCarrier('redbox');
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['RedBox'] }),
+    carriers: { redbox }
+  });
+
+  await orchestrator.onReturnApproved(approvedPayload);
+
+  const shipment = redbox.calls[0].payload;
+  assert.equal(shipment.returnId, 'gid://shopify/Return/1');
+  assert.equal(shipment.reverseFulfillmentOrderId, DEFAULT_RFO);
+  assert.equal(shipment.warehouse.name, 'Warehouse A');
+  assert.equal(shipment.customer.address.city, 'Riyadh');
+  assert.equal(shipment.items.length, 1);
 });
 
 test('a dry-run booking is never written back to Shopify', async () => {
@@ -127,7 +197,9 @@ test('both carrier tags go to manual review', async () => {
     shopify: fakeShopify({ tags: ['RedBox', 'aramex'] }),
     carriers: { redbox: fakeCarrier('redbox'), aramex: fakeCarrier('aramex') }
   });
+
   const { results } = await orchestrator.onReturnApproved(approvedPayload);
+
   assert.equal(results[0].reason, 'conflicting_carrier_tags');
 });
 
@@ -144,10 +216,43 @@ test('an unreadable return goes to manual review as order_not_accessible', async
   assert.equal(queued.length, 1);
 });
 
+test('missing warehouse data sends the return to manual review without booking', async () => {
+  const queued = [];
+  const redbox = fakeCarrier('redbox');
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['RedBox'], noWarehouse: true }),
+    carriers: { redbox },
+    manualReviewQueue: { async enqueue(record) { queued.push(record); } }
+  });
+
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
+
+  assert.equal(results[0].action, 'manual_review');
+  assert.equal(results[0].reason, 'no_warehouse');
+  assert.equal(redbox.calls.length, 0);
+  assert.equal(queued.length, 1);
+});
+
+test('unreadable shipment details go to manual review without booking', async () => {
+  const redbox = fakeCarrier('redbox');
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['RedBox'], detailsMissing: true }),
+    carriers: { redbox }
+  });
+
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
+
+  assert.equal(results[0].reason, 'details_not_accessible');
+  assert.equal(redbox.calls.length, 0);
+});
+
 test('each reverse fulfillment order is booked separately', async () => {
   const redbox = fakeCarrier('redbox');
   const orchestrator = createReturnOrchestrator({
-    shopify: fakeShopify({ tags: ['RedBox'], rfoIds: ['gid://shopify/ReverseFulfillmentOrder/5', 'gid://shopify/ReverseFulfillmentOrder/6'] }),
+    shopify: fakeShopify({
+      tags: ['RedBox'],
+      rfoIds: [DEFAULT_RFO, 'gid://shopify/ReverseFulfillmentOrder/6']
+    }),
     carriers: { redbox }
   });
 
@@ -158,11 +263,15 @@ test('each reverse fulfillment order is booked separately', async () => {
 });
 
 test('a failed booking marks the job failed and rethrows', async () => {
-  const broken = { name: 'redbox', async createReturnShipment() { throw new Error('carrier down'); } };
+  const broken = {
+    name: 'redbox',
+    async createReturnShipment() { throw new Error('carrier down'); }
+  };
   const orchestrator = createReturnOrchestrator({
     shopify: fakeShopify({ tags: ['RedBox'] }),
     carriers: { redbox: broken }
   });
+
   await assert.rejects(() => orchestrator.onReturnApproved(approvedPayload), /carrier down/);
 });
 

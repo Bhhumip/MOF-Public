@@ -2,11 +2,27 @@
 const { createRedboxClient } = require('./redbox');
 const { createAramexClient } = require('./aramex');
 
+// Log only identifiers and counts, never customer names, phones, emails or
+// addresses. A dry run on a real store must not leak customer details.
+function summarize(payload = {}, options = {}) {
+    return {
+        returnId: payload.returnId,
+        reverseFulfillmentOrderId: payload.reverseFulfillmentOrderId,
+        items: Array.isArray(payload.items) ? payload.items.length : undefined,
+        hasCustomerAddress: Boolean(payload.customer?.address),
+        warehouse: payload.warehouse?.name,
+        idempotencyKey: options.idempotencyKey
+    };
+}
+
 function createDryRunCarrier(name, logger = console) {
     return {
         name,
         async createReturnShipment(payload, options = {}) {
-            logger.log(`[dry-run] ${name} createReturnShipment (no API call)`, JSON.stringify({ payload, options }));
+            logger.log(
+                `[dry-run] ${name} createReturnShipment (no API call)`,
+                JSON.stringify(summarize(payload, options))
+            );
             return {
                 dryRun: true,
                 trackingNumber: `DRYRUN-${name}-${options.idempotencyKey || 'no-key'}`,

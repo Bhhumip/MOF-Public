@@ -32,6 +32,36 @@ const GET_RETURN_CONTEXT = `
   }
 `;
 
+const GET_RETURN_SHIPMENT_DETAILS = `
+  query GetReturnShipmentDetails($id: ID!) {
+    return(id: $id) {
+      id
+      order {
+        id
+        name
+        email
+        phone
+        shippingAddress { name company address1 address2 city province zip countryCodeV2 phone }
+        fulfillmentOrders(first: 10) {
+          nodes {
+            id
+            assignedLocation { name address1 address2 city province zip countryCode phone }
+            lineItems(first: 50) { nodes { lineItem { id } } }
+          }
+        }
+      }
+      reverseFulfillmentOrders(first: 10) {
+        nodes {
+          id
+          lineItems(first: 50) {
+            nodes { totalQuantity fulfillmentLineItem { lineItem { id sku name } } }
+          }
+        }
+      }
+    }
+  }
+`;
+
 function toOrderGid(orderId) {
   const value = String(orderId ?? '').trim();
   if (!value) throw new Error('An order ID is required');
@@ -90,7 +120,41 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
       reverseFulfillmentOrders: data.return.reverseFulfillmentOrders.nodes
     };
   }
-  return { endpoint, query, getOrderShipping, getReturnContext };
+  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails };
+
+
+  async function getReturnShipmentDetails(returnId) {
+    const id = String(returnId ?? '').trim();
+    if (!id) throw new Error('A return ID is required');
+    const data = await query(GET_RETURN_SHIPMENT_DETAILS, { id });
+    const ret = data.return;
+    if (!ret) return null;
+
+    return {
+      returnId: ret.id,
+      order: {
+        id: ret.order.id,
+        name: ret.order.name,
+        email: ret.order.email,
+        phone: ret.order.phone,
+        shippingAddress: ret.order.shippingAddress,
+        fulfillmentOrders: ret.order.fulfillmentOrders.nodes.map((fo) => ({
+          id: fo.id,
+          assignedLocation: fo.assignedLocation,
+          lineItemIds: fo.lineItems.nodes.map((item) => item.lineItem.id)
+        }))
+      },
+      reverseFulfillmentOrders: ret.reverseFulfillmentOrders.nodes.map((rfo) => ({
+        id: rfo.id,
+        lineItems: rfo.lineItems.nodes.map((item) => ({
+          lineItemId: item.fulfillmentLineItem?.lineItem?.id ?? null,
+          sku: item.fulfillmentLineItem?.lineItem?.sku ?? null,
+          name: item.fulfillmentLineItem?.lineItem?.name ?? '',
+          quantity: item.totalQuantity
+        }))
+      }))
+    };
+  }
 
 }
 

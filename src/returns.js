@@ -2,7 +2,7 @@
 
 const { resolveCarrierFromTags, FALLBACK_CARRIER } = require('./carriers/resolver');
 const { createMemoryJobStore } = require('./jobs');
-
+const { buildReturnShipment, ReturnShipmentError } = require('./return-shipment');
 /** Resolve the carrier for a return from the original order's tags. */
 function resolveReturnCarrier(returnData = {}, options = {}) {
   return resolveCarrierFromTags(returnData.tags, options);
@@ -13,7 +13,8 @@ function createReturnOrchestrator({
   shopify = null,
   carriers = {},
   manualReviewQueue = null,
-  jobStore = createMemoryJobStore()
+  jobStore = createMemoryJobStore(),
+  defaultItemWeightKg = null
 } = {}) {
   async function enqueueForReview(record) {
     if (manualReviewQueue) await manualReviewQueue.enqueue(record);
@@ -30,7 +31,7 @@ function createReturnOrchestrator({
       orderName: order.name
     });
     if (!claim.claimed) {
-      console.log(`[duplicate] RFO already processed: ${key}`);
+      console.log(`[duplicate] RFO already processed: ${key} (${claim.job.status})`);
       return { action: 'duplicate', reverseFulfillmentOrderId, status: claim.job.status };
     }
 
@@ -59,11 +60,24 @@ function createReturnOrchestrator({
       throw new Error(message);
     }
 
+    // Fetch address data only now, for a return that will really be booked.
+    let returnShipment;
     try {
-      const booking = await adapter.createReturnShipment(
-        { returnId, reverseFulfillmentOrderId },
-        { idempotencyKey: key }
-      );
+      const details = await shopify.getReturnShipmentDetails(returnId);
+      if (!details) throw new ReturnShipmentError('details_not_accessible');
+      returnShipment = buildReturnShipment({ returnId, reverseFulfillmentOrderId, details, defaultItemWeightKg });
+    } catch (error) {
+      if (error instanceof ReturnShipmentError) {
+        await jobStore.update(key, { status: 'manual_review', reason: error.code });
+        return enqueueForReview({ returnId, reverseFulfillmentOrderId, reason: error.code, matchedOn: match.matchedOn });
+      }
+      await jobStore.update(key, { status: 'failed', error: error.message });
+      throw error;
+    }
+
+
+    try {
+      const booking = await adapter.createReturnShipment(returnShipment, { idempotencyKey: key });
 
       // A dry-run booking has a fake tracking number: never write it to Shopify.
       if (shopify && !booking.dryRun) {
