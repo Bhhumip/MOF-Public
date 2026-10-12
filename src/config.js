@@ -10,6 +10,35 @@ function resolveCarrierMode(env) {
   return mode;
 }
 
+
+const JOB_STORE_TYPES = ['sqlite', 'mongodb'];
+
+function resolveJobStoreConfig(env) {
+  const type = (env.JOB_STORE || 'sqlite').trim().toLowerCase();
+
+  if (!JOB_STORE_TYPES.includes(type)) {
+    throw new Error(
+      `JOB_STORE must be one of: ${JOB_STORE_TYPES.join(', ')}`
+    );
+  }
+
+  const uri = env.MONGODB_URI || null;
+
+  if (type === 'mongodb' && !uri) {
+    throw new Error(
+      'MONGODB_URI is required when JOB_STORE=mongodb'
+    );
+  }
+
+  return {
+    type,
+    sqlitePath: env.JOB_DB_PATH || './data/jobs.sqlite',
+    mongodbUri: uri,
+    mongodbDatabase: env.MONGODB_DATABASE || 'mof_return_orchestration'
+  };
+}
+
+
 function assertNotProductionEndpoint(name, endpoint) {
   if (!endpoint) return;
   let host;
@@ -25,6 +54,7 @@ function assertNotProductionEndpoint(name, endpoint) {
 function getConfig(env = process.env) {
   const port = Number(env.PORT || 3000);
   const carrierMode = resolveCarrierMode(env);
+  const jobStore = resolveJobStoreConfig(env);
   const requiredVariables = [
     'SHOPIFY_STORE_DOMAIN',
     'SHOPIFY_ADMIN_ACCESS_TOKEN',
@@ -43,12 +73,13 @@ function getConfig(env = process.env) {
     throw new Error('PORT must be an integer between 1 and 65535');
   }
   assertNotProductionEndpoint('RedBox', env.REDBOX_API_ENDPOINT);
-  assertNotProductionEndpoint('Aramex', env.ARAMEX_API_ENDPOINT);
+  assertNotProductionEndpoint('Aramex', env.ARAMEX_SOAP_ENDPOINT);
   return {
     port,
     carrierMode,
     defaultItemWeightKg,
-    jobDbPath: env.JOB_DB_PATH || './data/jobs.sqlite',
+    jobStore,
+    jobDbPath: jobStore.sqlitePath,
 
     shopify: {
       storeDomain: env.SHOPIFY_STORE_DOMAIN,
@@ -75,19 +106,24 @@ function getConfig(env = process.env) {
         bearerToken: env.REDBOX_BEARER_TOKEN || null
       },
       aramex: {
-        endpoint: env.ARAMEX_API_ENDPOINT || null,//'https://ws.aramex.net/shippingapi.v2/shipping/service_1_0.svc/json',
+        // SOAP endpoint only.
+        endpoint: env.ARAMEX_SOAP_ENDPOINT || null,
+
         username: env.ARAMEX_USERNAME || null,
         password: env.ARAMEX_PASSWORD || null,
         version: env.ARAMEX_VERSION || 'v1',
+
         accountNumber: env.ARAMEX_ACCOUNT_NUMBER || null,
         accountPin: env.ARAMEX_ACCOUNT_PIN || null,
         accountEntity: env.ARAMEX_ACCOUNT_ENTITY || null,
         accountCountryCode: env.ARAMEX_ACCOUNT_COUNTRY_CODE || null,
+
         source: Number(env.ARAMEX_SOURCE || 24),
-        // Aramex webhook availability is unconfirmed. Default to polling
-        // via TrackShipments until the account manager confirms otherwise.
+
         trackingMode: env.ARAMEX_TRACKING_MODE || 'poll',
-        pollIntervalMs: Number(env.ARAMEX_POLL_INTERVAL_MS || 15 * 60 * 1000)
+        pollIntervalMs: Number(
+          env.ARAMEX_POLL_INTERVAL_MS || 15 * 60 * 1000
+        )
       }
     }
   };

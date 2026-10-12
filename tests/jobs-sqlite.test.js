@@ -15,6 +15,26 @@ test('the first claim wins and a second claim is a duplicate', async () => {
     store.close();
 });
 
+
+test('stored data cannot override the canonical job key', async () => {
+    const store = createSqliteJobStore(':memory:');
+
+    try {
+        await store.claim('canonical-key', {
+            key: 'incorrect-key',
+            returnId: 'return-1'
+        });
+
+        const job = await store.get('canonical-key');
+
+        assert.equal(job.key, 'canonical-key');
+        assert.equal(job.returnId, 'return-1');
+    } finally {
+        store.close();
+    }
+});
+
+
 test('update merges data and changes status; unknown keys throw', async () => {
     const store = createSqliteJobStore(':memory:');
     await store.claim('rfo:2', { returnId: 'r2' });

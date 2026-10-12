@@ -30,9 +30,10 @@ function createSqliteJobStore(filePath = ':memory:') {
     const all = db.prepare('SELECT * FROM return_jobs ORDER BY created_at, key');
 
     function toJob(row) {
+        if (!row) return null;
         return {
-            key: row.key,
             ...JSON.parse(row.data),
+            key: row.key,
             status: row.status,
             createdAt: row.created_at,
             updatedAt: row.updated_at

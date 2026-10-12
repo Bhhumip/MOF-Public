@@ -1,17 +1,8 @@
 'use strict';
 
 const name = 'aramex';
+const { createAramexSoapTransport, AramexSoapError } = require('./aramex-soap');
 
-// Aramex's JSON projection of the Shipping Services API. The underlying
-// service is SOAP-shaped; this endpoint accepts the same structure as JSON.
-// const DEFAULT_ENDPOINT =
-//   'https://ws.aramex.net/shippingapi.v2/shipping/service_1_0.svc/json';
-
-/**
- * Aramex reports movement as UpdateCode / UpdateDescription pairs.
- * Exact codes must be confirmed with the Aramex account manager; unmapped
- * codes fall through to 'unknown' and are preserved on the raw payload.
- */
 const STATUS_EVENT_MAP = Object.freeze({
   sh001: 'created',
   sh002: 'picked_up',
@@ -24,35 +15,41 @@ const STATUS_EVENT_MAP = Object.freeze({
 });
 
 class AramexApiError extends Error {
-  constructor(message, { operation, body } = {}) {
+  constructor(message, { operation, body, status } = {}) {
     super(message);
     this.name = 'AramexApiError';
     this.operation = operation;
     this.body = body;
+    this.status = status;
   }
 }
 
 function normalizeEvent(raw = {}) {
-  const code = String(raw.UpdateCode || raw.updateCode || '').trim().toLowerCase();
-  const status = String(raw.Status || raw.status || raw.Event || raw.event || '')
+  const code = String(raw.UpdateCode || raw.updateCode || '')
     .trim()
     .toLowerCase();
+
+  const status = String(
+    raw.Status || raw.status || raw.Event || raw.event || ''
+  ).trim().toLowerCase();
 
   return {
     carrier: name,
     event: STATUS_EVENT_MAP[code] || STATUS_EVENT_MAP[status] || 'unknown',
     rawStatus: code || status || null,
     occurredAt:
-      raw.UpdateDateTime || raw.updateDateTime || raw.EventDate || raw.eventDate || null,
-    trackingNumber: raw.TrackingNumber || raw.trackingNumber || raw.AWBNumber || null,
+      raw.UpdateDateTime ||
+      raw.updateDateTime ||
+      raw.EventDate ||
+      raw.eventDate ||
+      null,
+    trackingNumber:
+      raw.TrackingNumber || raw.trackingNumber || raw.AWBNumber || null,
     raw
   };
 }
 
-/**
- * Maps a neutral party descriptor onto Aramex's Shipper/Consignee shape.
- * For returns the roles are reversed: customer = Shipper, warehouse = Consignee.
- */
+// Maps a neutral party descriptor to Aramex's Shipper or Consignee structure.
 function toParty(party = {}) {
   return {
     Reference1: party.reference || '',
@@ -83,6 +80,105 @@ function toParty(party = {}) {
   };
 }
 
+// Extracts simple text values from a SOAP response, allowing namespace prefixes.
+function getXmlText(xml, elementName) {
+  const escapedName = elementName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const expression = new RegExp(
+    `<(?:[\\w.-]+:)?${escapedName}\\b[^>]*>([\\s\\S]*?)<\\/(?:[\\w.-]+:)?${escapedName}\\s*>`,
+    'i'
+  );
+  const match = xml.match(expression);
+
+  if (!match) return null;
+
+  return match[1]
+    .replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .trim();
+}
+
+// Converts the common shipment-creation response fields while retaining the original XML.
+function parseShipmentCreationResponse(xml) {
+  // Extract the response wrapper so shipment-level fields cannot be
+  // mistaken for fields belonging to the overall response.
+  const responseMatch = xml.match(
+    /<(?:[\w.-]+:)?ShipmentCreationResponse\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?ShipmentCreationResponse\s*>/i
+  );
+
+  const responseXml = responseMatch?.[1] || '';
+
+  // Exclude the Shipments container before reading the overall HasErrors flag.
+  const responseWithoutShipments = responseXml
+    .replace(
+      /<(?:[\w.-]+:)?Shipments\b[^>]*>[\s\S]*?<\/(?:[\w.-]+:)?Shipments\s*>/i,
+      ''
+    )
+    .replace(
+      /<(?:[\w.-]+:)?Shipments\b[^>]*\/\s*>/i,
+      ''
+    );
+
+  const hasErrorsText = getXmlText(
+    responseWithoutShipments,
+    'HasErrors'
+  );
+  const hasErrors = hasErrorsText === null
+    ? null
+    : hasErrorsText.toLowerCase() === 'true';
+
+  const processedShipmentMatch = xml.match(
+    /<(?:[\w.-]+:)?ProcessedShipment\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?ProcessedShipment\s*>/i
+  );
+  const processedShipmentXml = processedShipmentMatch?.[1] || '';
+  // Read the individual shipment status as well as the overall response status.
+  const shipmentHasErrorsText = getXmlText(
+    processedShipmentXml,
+    'HasErrors'
+  );
+
+  const shipmentHasErrors = shipmentHasErrorsText === null
+    ? null
+    : shipmentHasErrorsText.toLowerCase() === 'true';
+
+  const trackingNumber = getXmlText(processedShipmentXml, 'ID');
+  const trackingUrl = getXmlText(processedShipmentXml, 'LabelURL');
+  const label = getXmlText(processedShipmentXml, 'LabelFileContents');
+
+  const notifications = [];
+  const notificationExpression =
+    /<(?:[\w.-]+:)?Notification\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?Notification\s*>/gi;
+
+  for (const match of xml.matchAll(notificationExpression)) {
+    const message = getXmlText(match[1], 'Message');
+    const code = getXmlText(match[1], 'Code');
+
+    notifications.push({ code, message });
+  }
+
+  return {
+    carrier: name,
+    HasErrors: hasErrors,
+    Notifications: notifications,
+    ProcessedShipments: processedShipmentMatch
+      ? [{
+        ID: trackingNumber,
+        LabelURL: trackingUrl,
+        LabelFileContents: label,
+        LabelFileContents: label,
+        HasErrors: shipmentHasErrors
+      }]
+      : [],
+    trackingNumber,
+    trackingUrl,
+    label,
+    rawXml: xml
+  };
+}
+
 function createAramexClient(config = {}) {
   const {
     endpoint,
@@ -93,22 +189,25 @@ function createAramexClient(config = {}) {
     accountPin,
     accountEntity,
     accountCountryCode,
-    source = 24,
     fetchImpl = globalThis.fetch,
-    timeoutMs = 20000,
-    retries = 1,
-    retryDelayMs = 500
+    timeoutMs = 20000
   } = config;
-  if (!endpoint) throw new Error('RedBox client requires an endpoint (use the RedBox sandbox base URL)');
 
-  if (typeof fetchImpl !== 'function') {
-    throw new Error('Aramex client requires a fetch implementation');
+  if (!endpoint) {
+    throw new Error('Aramex client requires a SOAP service endpoint');
   }
+
   if (!username || !password) {
-    throw new Error('Aramex client requires username/password issued by Aramex account management');
+    throw new Error(
+      'Aramex client requires username/password issued by Aramex account management'
+    );
   }
 
-  const baseUrl = String(endpoint).replace(/\/+$/, '');
+  const transport = createAramexSoapTransport({
+    endpoint,
+    fetchImpl,
+    timeoutMs
+  });
 
   function clientInfo() {
     return {
@@ -118,81 +217,14 @@ function createAramexClient(config = {}) {
       AccountNumber: accountNumber || '',
       AccountPin: accountPin || '',
       AccountEntity: accountEntity || '',
-      AccountCountryCode: accountCountryCode || '',
-      Source: source
+      AccountCountryCode: accountCountryCode || ''
     };
-  }
-
-  async function once(operation, payload) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const response = await fetchImpl(`${baseUrl}/${operation}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ ...payload, ClientInfo: clientInfo() }),
-        signal: controller.signal
-      });
-
-      const text = await response.text();
-      let body;
-      try {
-        body = text ? JSON.parse(text) : null;
-      } catch {
-        body = text;
-      }
-
-      if (!response.ok) {
-        throw new AramexApiError(
-          `Aramex ${operation} failed with status ${response.status}`,
-          { operation, body }
-        );
-      }
-
-      // Aramex signals application-level failures inside a 200 response.
-      const hasErrors =
-        body && typeof body === 'object' && body.HasErrors === true;
-      if (hasErrors) {
-        throw new AramexApiError(
-          `Aramex ${operation} returned HasErrors=true`,
-          { operation, body }
-        );
-      }
-
-      return body;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async function call(operation, payload) {
-    let lastError;
-
-    for (let attempt = 0; attempt <= retries; attempt += 1) {
-      try {
-        return await once(operation, payload);
-      } catch (error) {
-        lastError = error;
-        const retryable =
-          error.name === 'AbortError' ||
-          (error instanceof AramexApiError && !error.operation);
-        if (!retryable || attempt === retries) throw error;
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * (attempt + 1)));
-      }
-    }
-    throw lastError;
   }
 
   return {
     name,
 
-    /**
-     * Books the reverse leg as a standard Aramex shipment with the shipper and
-     * consignee reversed — customer as shipper, client warehouse as consignee.
-     * There is no dedicated "return" endpoint in Aramex's API.
-     */
-    createReturnShipment({
+    async createReturnShipment({
       returnId,
       customer,
       warehouse,
@@ -204,22 +236,27 @@ function createAramexClient(config = {}) {
       paymentType = 'P',
       pickupDate
     } = {}) {
+      const shippingDateTime = pickupDate || new Date().toISOString();
+
       const shipment = {
-        Reference1: returnId,
+        Reference1: returnId || '',
         Reference2: '',
         Reference3: '',
         Shipper: toParty(customer),
         Consignee: toParty(warehouse),
         ThirdParty: {},
-        ShippingDateTime: pickupDate || new Date().toISOString(),
-        DueDate: pickupDate || new Date().toISOString(),
+        ShippingDateTime: shippingDateTime,
+        DueDate: shippingDateTime,
         Comments: `Return ${returnId || ''}`.trim(),
         PickupLocation: '',
         OperationsInstructions: '',
         PaymentType: paymentType,
         Details: {
           Dimensions: null,
-          ActualWeight: { Value: weight ?? 0, Unit: 'KG' },
+          ActualWeight: {
+            Value: weight ?? 0,
+            Unit: 'KG'
+          },
           ChargeableWeight: null,
           DescriptionOfGoods: description || 'Returned goods',
           GoodsOriginCountry: customer?.countryCode || '',
@@ -236,18 +273,79 @@ function createAramexClient(config = {}) {
         }
       };
 
-      return call('CreateShipments', {
-        Shipments: { Shipment: [shipment] },
-        Transaction: { Reference1: returnId || '' }
-      });
+      const request = {
+        ClientInfo: clientInfo(),
+        Transaction: {
+          Reference1: returnId || ''
+        },
+        Shipments: {
+          Shipment: [shipment]
+        },
+        LabelInfo: {
+          ReportID: 9201,
+          ReportType: 'URL'
+        }
+      };
+
+      try {
+        const xml = await transport.call(
+          'CreateShipments',
+          'ShipmentCreationRequest',
+          request
+        );
+
+        const result = parseShipmentCreationResponse(xml);
+
+        // A shipment must not be reported as successful unless the overall
+        // response and the individual shipment both explicitly report no errors.
+        const processedShipment = result.ProcessedShipments[0];
+
+        if (
+          result.HasErrors !== false ||
+          !processedShipment ||
+          processedShipment.HasErrors !== false ||
+          !processedShipment.ID
+        ) {
+          throw new AramexApiError(
+            'Aramex CreateShipments returned an incomplete or unsuccessful shipment response',
+            {
+              operation: 'CreateShipments',
+              body: result
+            }
+          );
+        }
+
+        return {
+          ...result,
+          trackingNumber: processedShipment.ID
+        };
+      } catch (error) {
+        if (error instanceof AramexSoapError) {
+          throw new AramexApiError(error.message, {
+            operation: error.operation,
+            status: error.status,
+            body: error.body
+          });
+        }
+
+        throw error;
+      }
     },
 
-    // --- Tracking / status ---
-    trackShipments(shipments = []) {
-      return call('TrackShipments', { Shipments: shipments });
+    // Tracking uses a separate Aramex service contract and will be integrated separately.
+    async trackShipments() {
+      throw new AramexApiError(
+        'Aramex tracking SOAP service has not been configured yet',
+        { operation: 'TrackShipments' }
+      );
     },
-    getShipments(shipments = []) {
-      return call('GetShipments', { Shipments: shipments });
+
+    // Shipment retrieval requires its own verified SOAP request contract.
+    async getShipments() {
+      throw new AramexApiError(
+        'Aramex GetShipments SOAP request has not been configured yet',
+        { operation: 'GetShipments' }
+      );
     },
 
     normalizeEvent
@@ -261,5 +359,5 @@ module.exports = {
   toParty,
   AramexApiError,
   STATUS_EVENT_MAP,
-  //DEFAULT_ENDPOINT
+  parseShipmentCreationResponse
 };

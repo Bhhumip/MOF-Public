@@ -4,18 +4,25 @@ const { createSqliteJobStore } = require('./jobs-sqlite');
 const { createWebhookHandler } = require('./webhooks');
 const { createShopifyClient } = require('./shopify');
 const { createReturnOrchestrator } = require('./returns');
-
+const { createMongoJobStore } = require('./jobs-mongodb');
 //const { createRedboxClient } = require('./carriers/redbox');
 //const { createAramexClient } = require('./carriers/aramex');
 const { buildCarriers } = require('./carriers/factory');
-function createServer({ config = getConfig() } = {}) {
+function createServer({ config = getConfig(), jobStore: injectedJobStore } = {}) {
   const shopify = createShopifyClient(config.shopify);
 
   // const carriers = {
   //   redbox: createRedboxClient(config.carriers.redbox),
   //   aramex: createAramexClient(config.carriers.aramex)
   // };
-  const jobStore = createSqliteJobStore(config.jobDbPath);
+  const jobStore = injectedJobStore ?? (
+    config.jobStore.type === 'mongodb'
+      ? createMongoJobStore({
+        uri: config.jobStore.mongodbUri,
+        databaseName: config.jobStore.mongodbDatabase
+      })
+      : createSqliteJobStore(config.jobStore.sqlitePath)
+  );
   const carriers = buildCarriers(config);
 
   const returns = createReturnOrchestrator({
@@ -31,7 +38,7 @@ function createServer({ config = getConfig() } = {}) {
     orchestrator: returns
   });
 
-  return http.createServer(async (request, response) => {
+  const server = http.createServer(async (request, response) => {
     try {
       if (request.url === '/health') {
         response.writeHead(200, { 'Content-Type': 'application/json' });
@@ -66,8 +73,23 @@ function createServer({ config = getConfig() } = {}) {
       }
       response.end(JSON.stringify({ error: 'internal_error' }));
     }
+
   });
+
+
+  server.on('close', () => {
+    Promise.resolve()
+      .then(() => jobStore.close())
+      .catch(error => {
+        console.error('Failed to close job store', error);
+      });
+  });
+
+
+  return server;
 }
+
+
 
 function start() {
   const config = getConfig();
