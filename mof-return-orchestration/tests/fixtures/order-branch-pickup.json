@@ -1,0 +1,18 @@
+{
+  "id": "gid://shopify/Order/1005",
+  "name": "#1005",
+  "tags": [
+    "Paytabs",
+    "printed"
+  ],
+  "shippingLines": [
+    {
+      "id": "gid://shopify/ShippingLine/3",
+      "title": "ECM - Jeddah  | المتجر الإلكتروني - جدة",
+      "code": "ECM - Jeddah  | المتجر الإلكتروني - جدة",
+      "source": "shopify",
+      "carrierIdentifier": null,
+      "custom": false
+    }
+  ]
+}

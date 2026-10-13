@@ -1,0 +1,36 @@
+client_id = "ad9441bbf3210be431f8214f4c5eb203"
+name = "medical-outfit-middleware"
+application_url = "https://1389-49-43-7-189.ngrok-free.app"
+embedded = true
+
+[access_scopes]
+scopes = "read_customers,read_merchant_managed_fulfillment_orders,read_orders,read_returns,write_returns"
+
+[auth]
+redirect_urls = [ "https://1389-49-43-7-189.ngrok-free.app/auth/callback" ]
+
+[webhooks]
+api_version = "2026-07"
+
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+  [[webhooks.subscriptions]]
+    topics = ["returns/approve"]
+    uri = "https://betsey-nonsidereal-preeditorially.ngrok-free.dev/webhooks/shopify"
+
+[[webhooks.subscriptions]]
+  topics = ["reverse_fulfillment_orders/dispose"]
+  uri = "https://betsey-nonsidereal-preeditorially.ngrok-free.dev/webhooks/shopify"
+
+
+
+  
+[build]
+automatically_update_urls_on_dev = true
