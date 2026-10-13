@@ -7,6 +7,8 @@ const { createReturnOrchestrator } = require('./returns');
 const { createMongoJobStore } = require('./jobs-mongodb');
 //const { createRedboxClient } = require('./carriers/redbox');
 //const { createAramexClient } = require('./carriers/aramex');
+const { createRedboxWebhookHandler, verifyBearerToken } = require('./carriers/redbox-webhook');
+
 const { buildCarriers } = require('./carriers/factory');
 function createServer({ config = getConfig(), jobStore: injectedJobStore } = {}) {
   const shopify = createShopifyClient(config.shopify);
@@ -23,6 +25,17 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
       })
       : createSqliteJobStore(config.jobStore.sqlitePath)
   );
+
+  const rb = config.carriers.redbox;
+  const handleRedboxWebhook = rb.webhookSecret
+    ? createRedboxWebhookHandler({
+      verify: verifyBearerToken({ secret: rb.webhookSecret }),
+      jobStore
+      // onEvent: async (event, job) => { /* ops alert, e.g. on 'expired' or 'exception' */ }
+    })
+    : null;
+
+
   const carriers = buildCarriers(config);
 
   const returns = createReturnOrchestrator({
@@ -61,6 +74,11 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
         const result = await returns.handle(returnData);
         response.writeHead(202, { 'Content-Type': 'application/json' });
         response.end(JSON.stringify(result));
+        return;
+      }
+
+      if (request.url === '/webhooks/redbox' && handleRedboxWebhook) {
+        await handleRedboxWebhook(request, response);
         return;
       }
 

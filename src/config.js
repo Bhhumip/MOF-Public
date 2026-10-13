@@ -99,11 +99,12 @@ function getConfig(env = process.env) {
     },
     carriers: {
       redbox: {
-        endpoint: env.REDBOX_API_ENDPOINT || null,//'https://api.redboxsa.com',
-        apiVersion: env.REDBOX_API_VERSION || null,//'v3',
-        // Bearer token issued per business account by RedBox support /
-        // account manager. Store in a secrets manager per §8.
-        bearerToken: env.REDBOX_BEARER_TOKEN || null
+        endpoint: env.REDBOX_API_ENDPOINT || null,          // https://stage.api.redboxsa.com
+        apiVersion: env.REDBOX_API_VERSION || null,         // null => client uses v3
+        bearerToken: env.REDBOX_BEARER_TOKEN || null,       // issued by RedBox support
+        webhookSecret: env.REDBOX_WEBHOOK_SECRET || null,   // we choose it; RedBox echoes it back
+        webhookSubscriber: env.REDBOX_WEBHOOK_SUBSCRIBER || null, // business name, required by RedBox
+        allowUnconfirmedContract: env.REDBOX_ALLOW_UNCONFIRMED_CONTRACT === 'true'
       },
       aramex: {
         // SOAP endpoint only.

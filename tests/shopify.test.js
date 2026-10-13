@@ -100,3 +100,45 @@ test('getReturnShipmentDetails returns null when the return cannot be read', asy
     const { client } = clientReturning({ data: { return: null } });
     assert.equal(await client.getReturnShipmentDetails('gid://shopify/Return/404'), null);
 });
+
+test('createReverseDeliveryWithShipping sends only fields Shopify accepts', async () => {
+    const { client, calls } = clientReturning({
+        data: { reverseDeliveryCreateWithShipping: { reverseDelivery: { id: 'gid://shopify/ReverseDelivery/1' }, userErrors: [] } }
+    });
+    const result = await client.createReverseDeliveryWithShipping({
+        reverseFulfillmentOrderId: 'gid://shopify/ReverseFulfillmentOrder/5',
+        trackingInput: { number: 'TRK1', company: 'redbox', url: 'https://t.example/1' },
+        labelInput: { fileUrl: 'https://l.example/1.pdf', fileName: 'label.pdf' },
+        notifyCustomer: true
+    });
+    const vars = calls[0].variables;
+    assert.equal(result.id, 'gid://shopify/ReverseDelivery/1');
+    assert.deepEqual(vars.trackingInput, { number: 'TRK1', url: 'https://t.example/1' }); // no company
+    assert.deepEqual(vars.labelInput, { fileUrl: 'https://l.example/1.pdf' });            // no fileName
+    assert.deepEqual(vars.reverseDeliveryLineItems, []);                                  // all items
+    assert.equal(vars.notifyCustomer, true);
+});
+
+test('createReverseDeliveryWithShipping omits tracking and label when absent', async () => {
+    const { client, calls } = clientReturning({
+        data: { reverseDeliveryCreateWithShipping: { reverseDelivery: { id: 'x' }, userErrors: [] } }
+    });
+    await client.createReverseDeliveryWithShipping({ reverseFulfillmentOrderId: 'gid://shopify/ReverseFulfillmentOrder/5' });
+    assert.equal(calls[0].variables.trackingInput, null);
+    assert.equal(calls[0].variables.labelInput, null);
+});
+
+test('createReverseDeliveryWithShipping throws on userErrors', async () => {
+    const { client } = clientReturning({
+        data: { reverseDeliveryCreateWithShipping: { reverseDelivery: null, userErrors: [{ field: ['x'], message: 'Not allowed' }] } }
+    });
+    await assert.rejects(
+        () => client.createReverseDeliveryWithShipping({ reverseFulfillmentOrderId: 'gid://shopify/ReverseFulfillmentOrder/5' }),
+        /Not allowed/
+    );
+});
+
+test('createReverseDeliveryWithShipping requires an RFO id', async () => {
+    const { client } = clientReturning({ data: {} });
+    await assert.rejects(() => client.createReverseDeliveryWithShipping({}), /reverse fulfillment order ID is required/);
+});

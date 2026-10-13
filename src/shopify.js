@@ -42,6 +42,7 @@ const GET_RETURN_SHIPMENT_DETAILS = `
         email
         phone
         shippingAddress { name company address1 address2 city province zip countryCodeV2 phone }
+        fulfillments(first: 10) { trackingInfo(first: 3) { number company } }
         fulfillmentOrders(first: 10) {
           nodes {
             id
@@ -58,6 +59,28 @@ const GET_RETURN_SHIPMENT_DETAILS = `
           }
         }
       }
+    }
+  }
+`;
+
+
+const REVERSE_DELIVERY_CREATE_WITH_SHIPPING = `
+  mutation ReverseDeliveryCreateWithShipping(
+    $reverseFulfillmentOrderId: ID!
+    $reverseDeliveryLineItems: [ReverseDeliveryLineItemInput!]!
+    $trackingInput: ReverseDeliveryTrackingInput
+    $labelInput: ReverseDeliveryLabelInput
+    $notifyCustomer: Boolean
+  ) {
+    reverseDeliveryCreateWithShipping(
+      reverseFulfillmentOrderId: $reverseFulfillmentOrderId
+      reverseDeliveryLineItems: $reverseDeliveryLineItems
+      trackingInput: $trackingInput
+      labelInput: $labelInput
+      notifyCustomer: $notifyCustomer
+    ) {
+      reverseDelivery { id }
+      userErrors { field message }
     }
   }
 `;
@@ -119,8 +142,46 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
       },
       reverseFulfillmentOrders: data.return.reverseFulfillmentOrders.nodes
     };
+
   }
-  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails };
+  // Writes the carrier booking back to Shopify. An empty line-item list makes
+  // Shopify create a line item for every item on the RFO (full quantity).
+  async function createReverseDeliveryWithShipping({
+    reverseFulfillmentOrderId,
+    trackingInput = null,
+    labelInput = null,
+    notifyCustomer = false,
+    reverseDeliveryLineItems = []
+  } = {}) {
+    const id = String(reverseFulfillmentOrderId ?? '').trim();
+    if (!id) throw new Error('A reverse fulfillment order ID is required');
+
+    // Shopify accepts only number + url for tracking and fileUrl for the label.
+    const tracking = trackingInput?.number
+      ? {
+        number: String(trackingInput.number),
+        ...(trackingInput.url ? { url: trackingInput.url } : {})
+      }
+      : null;
+    const label = labelInput?.fileUrl ? { fileUrl: labelInput.fileUrl } : null;
+
+    const data = await query(REVERSE_DELIVERY_CREATE_WITH_SHIPPING, {
+      reverseFulfillmentOrderId: id,
+      reverseDeliveryLineItems,
+      trackingInput: tracking,
+      labelInput: label,
+      notifyCustomer: Boolean(notifyCustomer)
+    });
+
+    const result = data.reverseDeliveryCreateWithShipping;
+    if (result.userErrors?.length) {
+      throw new Error(
+        `reverseDeliveryCreateWithShipping failed: ${result.userErrors.map((e) => e.message).join('; ')}`
+      );
+    }
+    return result.reverseDelivery;
+  }
+  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails, createReverseDeliveryWithShipping };
 
 
   async function getReturnShipmentDetails(returnId) {

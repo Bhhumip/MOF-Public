@@ -18,7 +18,8 @@ if (command === 'list') {
             error: data.error,
             trackingNumber: data.trackingNumber,
             createdAt: row.created_at,
-            updatedAt: row.updated_at
+            updatedAt: row.updated_at,
+            carrierStatus: data.carrierStatus,
         });
     }
 } else if (command === 'delete' && needle) {
