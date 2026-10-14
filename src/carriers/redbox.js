@@ -37,7 +37,8 @@ const STATUS_EVENT_MAP = Object.freeze({
   exception: 'exception',
   failed: 'exception',
   processing: 'created',     // documented RedBox status
-  deposited: 'deposited',    // documented RedBox status (parcel placed in a locker)
+  deposited: 'deposited',   // documented RedBox status (parcel placed in a locker)
+  r_waiting: 'created',   // seen in the sandbox: return booked, waiting for the customer (meaning to confirm with RedBox)
 });
 
 class RedboxApiError extends Error {
@@ -67,7 +68,7 @@ function lookupEvent(status) {
 }
 
 function normalizeEvent(raw = {}) {
-  const status = String(raw.status ?? raw.status_code ?? raw.status_name ?? raw.state ?? raw.event ?? '')
+  const status = String(raw.status ?? defaultContract.pickStatus(raw) ?? raw.state ?? raw.event ?? '')
     .trim()
     .toLowerCase();
 

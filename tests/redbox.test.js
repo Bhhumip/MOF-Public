@@ -392,3 +392,39 @@ test('documented RedBox statuses map as intended; undefined ones stay unknown', 
         assert.equal(result.rawStatus, status.toLowerCase());
     }
 });
+
+test('phone numbers are sent without spaces or punctuation', () => {
+    const { buildReturnShipmentRequest } = require('../src/carriers/redbox-contract');
+    const body = buildReturnShipmentRequest({
+        orderName: '#1', reverseFulfillmentOrderId: 'gid://shopify/ReverseFulfillmentOrder/5',
+        customer: { name: 'A', phone: '+966 54 666-9163' },
+        warehouse: { name: 'W', phone: '(011) 123 4567' }
+    });
+    assert.equal(body.customer_phone, '+966546669163');
+    assert.equal(body.sender_phone, '0111234567');
+});
+
+
+test('tracking page: the real sandbox field names are understood', () => {
+    const { parseTrackingPageResponse } = require('../src/carriers/redbox-contract');
+    assert.equal(
+        parseTrackingPageResponse({ url_bitly: 'https://rdbx.me/x', url_original: 'https://stage.redboxsa.com/package-tracking/abc' }),
+        'https://stage.redboxsa.com/package-tracking/abc'
+    );
+    assert.equal(parseTrackingPageResponse({ url_bitly: 'https://rdbx.me/x' }), 'https://rdbx.me/x');
+    assert.equal(parseTrackingPageResponse({ original_url: 'https://a.example/1' }), 'https://a.example/1');
+});
+
+test('the real sandbox status R-Waiting maps to created even when status_code is numeric', () => {
+    const { normalizeEvent } = require('../src/carriers/redbox');
+    assert.equal(normalizeEvent({ status_name: 'R-Waiting', status_code: 202 }).event, 'created');
+});
+
+test('status selection: textual code first, then name, numeric code last', () => {
+    const { pickStatus } = require('../src/carriers/redbox-contract');
+    assert.equal(pickStatus({ status_code: 'Delivered', status_name: 'x' }), 'Delivered');
+    assert.equal(pickStatus({ status_code: 202, status_name: 'R-Waiting' }), 'R-Waiting');
+    assert.equal(pickStatus({ status_code: '202', status_name: 'R-Waiting' }), 'R-Waiting');
+    assert.equal(pickStatus({ status_code: 202 }), 202);
+    assert.equal(pickStatus({}), null);
+});

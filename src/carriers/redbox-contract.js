@@ -39,6 +39,12 @@ function clean(value) {
     return value == null ? '' : String(value).trim();
 }
 
+
+/** "+966 54 666 9163" -> "+966546669163" (RedBox phone format is unconfirmed; digits are the safest) */
+function normalizePhone(value) {
+    return clean(value).replace(/[\s\-().]/g, '');
+}
+
 /** "Line1, Line2, City, State, Postcode" -> one string (RedBox address fields are single strings). */
 function joinAddress(address) {
     if (!address) return '';
@@ -99,14 +105,14 @@ function buildReturnShipmentRequest(shipment = {}, { originalShipmentId = null }
     const body = omitEmpty({
         reference,
         customer_name: clean(customer.name),
-        customer_phone: clean(customer.phone),
+        customer_phone: normalizePhone(customer.phone),
         customer_email: clean(customer.email),
         customer_address: joinAddress(customerAddress),
         customer_city: clean(customerAddress?.city),
         customer_country: clean(customerAddress?.countryCode),
 
         sender_name: clean(warehouse.name),
-        sender_phone: clean(warehouse.phone),
+        sender_phone: normalizePhone(warehouse.phone),
         sender_address: joinAddress(warehouseAddress),
 
         weight_unit: weight && weight.value > 0 ? 'kg' : '', // accepted spellings unconfirmed
@@ -174,7 +180,10 @@ const parseLabelResponse = (response) => urlOrNull(response?.url);
 
 /** GET /shipments/{id}/tracking-page -> { original_url, short_url, success } */
 const parseTrackingPageResponse = (response) =>
-    urlOrNull(response?.original_url) || urlOrNull(response?.short_url);
+    urlOrNull(response?.url_original) ||
+    urlOrNull(response?.original_url) ||
+    urlOrNull(response?.url_bitly) ||
+    urlOrNull(response?.short_url);
 
 /** GET /shipments/{id} -> { shipment: { id, tracking_number, is_return, reference, status_code, ... } } */
 function parseShipmentDetails(response) {
@@ -186,6 +195,17 @@ function parseShipmentDetails(response) {
         isReturn: Boolean(shipment.is_return),
         reference: shipment.reference ?? null
     };
+}
+
+/**
+ * Status field choice. Real sandbox data: status_name "R-Waiting" with numeric
+ * status_code 202, so a numeric code is useless as a key. Prefer a textual status_code,
+ * then the name or label, and the numeric code last.
+ */
+function pickStatus(body = {}) {
+    const code = body.status_code;
+    const codeIsText = typeof code === 'string' && code.trim() !== '' && !/^\d+$/.test(code.trim());
+    return (codeIsText ? code : null) ?? body.status_name ?? body.status_label ?? code ?? null;
 }
 
 /** GET /shipments?page&page_size -> { shipments: [...], paging: { total_pages } } */
@@ -222,9 +242,10 @@ function buildWebhookRegistration({ event, targetUrl, subscriber, originalId, se
  * receiver de-duplicates on tracking number + status + date.
  */
 function parseWebhookEvent(body = {}) {
+    const status = pickStatus(body);
     return {
         eventId: null,
-        status: body.status_code ?? body.status_name ?? body.status_label ?? null,
+        status: status,
         statusName: body.status_name ?? null,
         statusLabel: body.status_label ?? null,
         occurredAt: body.date ?? null,
@@ -246,5 +267,7 @@ module.exports = {
     parseShipmentDetails,
     parseShipmentList,
     buildWebhookRegistration,
-    parseWebhookEvent
+    parseWebhookEvent,
+    pickStatus,
+    normalizePhone
 };
