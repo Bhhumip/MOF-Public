@@ -39,6 +39,16 @@ const STATUS_EVENT_MAP = Object.freeze({
   processing: 'created',     // documented RedBox status
   deposited: 'deposited',   // documented RedBox status (parcel placed in a locker)
   r_waiting: 'created',   // seen in the sandbox: return booked, waiting for the customer (meaning to confirm with RedBox)
+  received: 'received',            // sender deposited at a locker, awaiting dispatch
+  locked: 'locked',
+  lost: 'exception',
+  liquidated: 'exception',
+  in_transit_ex: 'returning_to_origin',
+  not_delivered: 'returned_to_origin',
+  not_deposited: 'exception',      // portal spelling
+  notdeposited: 'exception',       // API-doc spelling (no hyphen)
+  r_deposited: 'deposited',        // customer dropped the return off
+  in_transit_r: 'in_transit',      // return collected from the locker
 });
 
 class RedboxApiError extends Error {
@@ -83,6 +93,25 @@ function normalizeEvent(raw = {}) {
   };
 }
 
+/**
+ * Pick the outbound RedBox tracking number from Shopify's fulfillment tracking entries.
+ * Prefer entries whose company says RedBox. More than one distinct number means the
+ * returned items left in different parcels, so a person must decide.
+ */
+function pickOriginalTrackingNumber(entries = []) {
+  const redbox = entries.filter((entry) => /redbox/i.test(entry.company || ''));
+  const pool = redbox.length > 0 ? redbox : entries;
+  const numbers = [...new Set(pool.map((entry) => String(entry.number).trim()).filter(Boolean))];
+  if (numbers.length > 1) {
+    throw new RedboxContractError(
+      'multiple_original_shipments',
+      `Returned items shipped in ${numbers.length} parcels; cannot pick one original RedBox shipment`,
+      { numbers }
+    );
+  }
+  return numbers[0] || null;
+}
+
 function createRedboxClient(config = {}) {
   const {
     endpoint,
@@ -93,7 +122,8 @@ function createRedboxClient(config = {}) {
     retryDelayMs = 300,
     contract = defaultContract,
     allowUnconfirmedContract = false,
-    logger = console
+    logger = console,
+    requireOriginalShipment = false
   } = config;
   // config.js passes `null` when the env var is unset; a destructuring default
   // only covers `undefined`, so normalise explicitly (null produced ".../null/...").
@@ -206,8 +236,11 @@ function createRedboxClient(config = {}) {
       const details = contract.parseShipmentDetails(await getShipment(trackingNumber));
       return details ? details.shipmentId : null;
     } catch (error) {
-      logger.warn(`[redbox] original shipment ${trackingNumber} not found, using external return: ${error.message}`);
-      return null;
+      if (error instanceof RedboxApiError && error.status === 404) {
+        logger.warn(`[redbox] original shipment ${trackingNumber} not found at RedBox`);
+        return null;
+      }
+      throw error; // outage or timeout: let the job fail visibly instead of guessing
     }
   }
 
@@ -253,8 +286,19 @@ function createRedboxClient(config = {}) {
 
     // Optional: neutral shipment may carry the original outbound shipment.
     let originalShipmentId = shipment.originalShipmentId || null;
-    if (!originalShipmentId && shipment.originalTrackingNumber) {
-      originalShipmentId = await lookupOriginalShipmentId(shipment.originalTrackingNumber);
+    const originalTrackingNumber =
+      shipment.originalTrackingNumber || pickOriginalTrackingNumber(shipment.originalTracking);
+    if (!originalShipmentId && originalTrackingNumber) {
+      originalShipmentId = await lookupOriginalShipmentId(originalTrackingNumber);
+    }
+    if (!originalShipmentId && requireOriginalShipment) {
+      throw new RedboxContractError(
+        'original_shipment_not_found',
+        originalTrackingNumber
+          ? `RedBox has no shipment for tracking number ${originalTrackingNumber}`
+          : 'The order has no tracking number to find the original RedBox shipment',
+        { originalTrackingNumber }
+      );
     }
 
     const body = contract.buildReturnShipmentRequest(shipment, { originalShipmentId });
@@ -354,5 +398,6 @@ module.exports = {
   RedboxApiError,
   RedboxContractError,
   STATUS_EVENT_MAP,
-  DEFAULT_API_VERSION
+  DEFAULT_API_VERSION,
+  pickOriginalTrackingNumber
 };

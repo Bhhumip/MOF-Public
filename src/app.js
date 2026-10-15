@@ -8,7 +8,7 @@ const { createMongoJobStore } = require('./jobs-mongodb');
 //const { createRedboxClient } = require('./carriers/redbox');
 //const { createAramexClient } = require('./carriers/aramex');
 const { createRedboxWebhookHandler, verifyBearerToken } = require('./carriers/redbox-webhook');
-
+const { createStatusSync } = require('./status-sync');
 const { buildCarriers } = require('./carriers/factory');
 function createServer({ config = getConfig(), jobStore: injectedJobStore } = {}) {
   const shopify = createShopifyClient(config.shopify);
@@ -26,11 +26,24 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
       : createSqliteJobStore(config.jobStore.sqlitePath)
   );
 
+  const statusSync = createStatusSync({ shopify, enabled: config.shopify.statusSync });
   const rb = config.carriers.redbox;
   const handleRedboxWebhook = rb.webhookSecret
     ? createRedboxWebhookHandler({
       verify: verifyBearerToken({ secret: rb.webhookSecret }),
-      jobStore
+      jobStore,
+      onEvent: async (event, job) => {
+        // An older event leaves carrierStatus unchanged: skip it, so Shopify never shows a stale status.
+        const fresh = await jobStore.get(job.key);
+        if (!fresh || fresh.carrierStatus !== event.event) return;
+
+        await statusSync.recordEvent(fresh, event);
+
+        if (['returned', 'expired', 'exception', 'cancelled'].includes(event.event)) {
+          console.warn(`[ops] ${fresh.key}: RedBox status "${event.rawStatus}" (${event.event})`);
+          await jobStore.update(fresh.key, { needsAttention: event.event });
+        }
+      }
       // onEvent: async (event, job) => { /* ops alert, e.g. on 'expired' or 'exception' */ }
     })
     : null;
@@ -42,7 +55,8 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
     shopify,
     carriers,
     jobStore,
-    defaultItemWeightKg: config.defaultItemWeightKg
+    defaultItemWeightKg: config.defaultItemWeightKg,
+    statusSync
     // manualReviewQueue: ...  // wire to ops queue per §8
   });
 

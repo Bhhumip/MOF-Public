@@ -119,3 +119,17 @@ test('the configured default fills in only the items with no weight', () => {
     assert.deepEqual(shipment.weight, { value: 3, unit: 'KG' }); // 2 x 1 + 1
     assert.equal(shipment.weightEstimated, true);
 });
+
+
+test('original tracking comes only from fulfillments that carried the returned items', () => {
+    const details = makeDetails({
+        order: {
+            fulfillments: [
+                { lineItemIds: ['gid://shopify/LineItem/4'], trackingInfo: [{ number: '111', company: 'RedBox' }] },
+                { lineItemIds: ['gid://shopify/LineItem/99'], trackingInfo: [{ number: '999', company: 'Other' }] }
+            ]
+        }
+    });
+    const shipment = buildReturnShipment({ returnId: 'r', reverseFulfillmentOrderId: RFO, details });
+    assert.deepEqual(shipment.originalTracking, [{ number: '111', company: 'RedBox' }]);
+});

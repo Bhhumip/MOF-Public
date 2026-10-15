@@ -142,3 +142,43 @@ test('createReverseDeliveryWithShipping requires an RFO id', async () => {
     const { client } = clientReturning({ data: {} });
     await assert.rejects(() => client.createReverseDeliveryWithShipping({}), /reverse fulfillment order ID is required/);
 });
+
+function sequence(...bodies) {
+    const calls = [];
+    const fetchImpl = async (url, options) => {
+        calls.push(JSON.parse(options.body));
+        return { ok: true, status: 200, json: async () => bodies.shift() };
+    };
+    const client = createShopifyClient({ storeDomain: 't.myshopify.com', adminAccessToken: 't', apiVersion: '2026-07', fetchImpl });
+    return { client, calls };
+}
+
+test('upsertReturnShipmentRecord sends the app-owned type, the handle and only non-empty fields', async () => {
+    const { client, calls } = sequence({ data: { metaobjectUpsert: { metaobject: { id: 'gid://shopify/Metaobject/1', handle: 'rfo-5' }, userErrors: [] } } });
+    const record = await client.upsertReturnShipmentRecord('rfo-5', { status: 'created', tracking_url: null, carrier: '' });
+    assert.deepEqual(calls[0].variables.handle, { type: '$app:return_shipment', handle: 'rfo-5' });
+    assert.deepEqual(calls[0].variables.metaobject.fields, [{ key: 'status', value: 'created' }]);
+    assert.equal(record.id, 'gid://shopify/Metaobject/1');
+});
+
+test('upsertReturnShipmentRecord throws on userErrors', async () => {
+    const { client } = sequence({ data: { metaobjectUpsert: { metaobject: null, userErrors: [{ message: 'Definition not found' }] } } });
+    await assert.rejects(() => client.upsertReturnShipmentRecord('rfo-5', { status: 'x' }), /Definition not found/);
+});
+
+test('linkReturnShipmentToOrder appends once and never duplicates', async () => {
+    const existing = JSON.stringify(['gid://shopify/Metaobject/1']);
+    const { client, calls } = sequence(
+        { data: { order: { id: 'gid://shopify/Order/9', metafield: { value: existing } } } },
+        { data: { metafieldsSet: { metafields: [{ id: 'm' }], userErrors: [] } } }
+    );
+    assert.deepEqual(await client.linkReturnShipmentToOrder('9', 'gid://shopify/Metaobject/2'), { changed: true });
+    const sent = calls[1].variables.metafields[0];
+    assert.equal(sent.namespace, '$app');
+    assert.equal(sent.type, 'list.metaobject_reference');
+    assert.deepEqual(JSON.parse(sent.value), ['gid://shopify/Metaobject/1', 'gid://shopify/Metaobject/2']);
+
+    const again = sequence({ data: { order: { id: 'gid://shopify/Order/9', metafield: { value: existing } } } });
+    assert.deepEqual(await again.client.linkReturnShipmentToOrder('9', 'gid://shopify/Metaobject/1'), { changed: false });
+    assert.equal(again.calls.length, 1);
+});

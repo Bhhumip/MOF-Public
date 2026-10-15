@@ -51,6 +51,8 @@ function assertNotProductionEndpoint(name, endpoint) {
     throw new Error(`${name} endpoint points at a production host (${host}). Use the sandbox base URL.`);
   }
 }
+
+
 function getConfig(env = process.env) {
   const port = Number(env.PORT || 3000);
   const carrierMode = resolveCarrierMode(env);
@@ -86,6 +88,7 @@ function getConfig(env = process.env) {
       adminAccessToken: env.SHOPIFY_ADMIN_ACCESS_TOKEN,
       apiVersion: env.SHOPIFY_API_VERSION || '2026-07',
       webhookSecret: env.SHOPIFY_WEBHOOK_SECRET,
+      statusSync: env.SHOPIFY_STATUS_SYNC === 'true',
 
       // Topics the middleware subscribes to. returns/request fires when a
       // customer initiates a return; returns/approve fires when the merchant
@@ -104,7 +107,8 @@ function getConfig(env = process.env) {
         bearerToken: env.REDBOX_BEARER_TOKEN || null,       // issued by RedBox support
         webhookSecret: env.REDBOX_WEBHOOK_SECRET || null,   // we choose it; RedBox echoes it back
         webhookSubscriber: env.REDBOX_WEBHOOK_SUBSCRIBER || null, // business name, required by RedBox
-        allowUnconfirmedContract: env.REDBOX_ALLOW_UNCONFIRMED_CONTRACT === 'true'
+        allowUnconfirmedContract: env.REDBOX_ALLOW_UNCONFIRMED_CONTRACT === 'true',
+        requireOriginalShipment: env.REDBOX_REQUIRE_ORIGINAL_SHIPMENT !== 'false',
       },
       aramex: {
         // SOAP endpoint only.

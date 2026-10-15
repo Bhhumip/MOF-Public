@@ -42,7 +42,9 @@ const GET_RETURN_SHIPMENT_DETAILS = `
         email
         phone
         shippingAddress { name company address1 address2 city province zip countryCodeV2 phone }
-        fulfillments(first: 10) { trackingInfo(first: 3) { number company } }
+        fulfillments(first: 10) {  trackingInfo(first: 3) { number company }  
+        fulfillmentLineItems(first: 50) { nodes { lineItem { id } } 
+        } }
         fulfillmentOrders(first: 10) {
           nodes {
             id
@@ -81,6 +83,31 @@ const REVERSE_DELIVERY_CREATE_WITH_SHIPPING = `
     ) {
       reverseDelivery { id }
       userErrors { field message }
+    }
+  }
+`;
+const RETURN_SHIPMENT_TYPE = '$app:return_shipment';
+
+const UPSERT_RETURN_SHIPMENT = `
+  mutation UpsertReturnShipment($handle: MetaobjectHandleInput!, $metaobject: MetaobjectUpsertInput!) {
+    metaobjectUpsert(handle: $handle, metaobject: $metaobject) {
+      metaobject { id handle }
+      userErrors { field message code }
+    }
+  }
+`;
+
+const GET_ORDER_RETURN_SHIPMENTS = `
+  query GetOrderReturnShipments($id: ID!) {
+    order(id: $id) { id metafield(namespace: "$app", key: "return_shipments") { value } }
+  }
+`;
+
+const SET_ORDER_RETURN_SHIPMENTS = `
+  mutation SetOrderReturnShipments($metafields: [MetafieldsSetInput!]!) {
+    metafieldsSet(metafields: $metafields) {
+      metafields { id }
+      userErrors { field message code }
     }
   }
 `;
@@ -181,7 +208,47 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
     }
     return result.reverseDelivery;
   }
-  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails, createReverseDeliveryWithShipping };
+
+  // One record per Reverse Fulfillment Order. Upsert = create or update by handle, safe to repeat.
+  async function upsertReturnShipmentRecord(handle, fields) {
+    const list = Object.entries(fields)
+      .filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '')
+      .map(([key, value]) => ({ key, value: String(value) }));
+    const data = await query(UPSERT_RETURN_SHIPMENT, {
+      handle: { type: RETURN_SHIPMENT_TYPE, handle },
+      metaobject: { fields: list }
+    });
+    const result = data.metaobjectUpsert;
+    if (result.userErrors?.length) {
+      throw new Error(`metaobjectUpsert failed: ${result.userErrors.map((e) => e.message).join('; ')}`);
+    }
+    return result.metaobject;
+  }
+
+  // Adds the record to the order's list of return shipments (no duplicates).
+  async function linkReturnShipmentToOrder(orderId, metaobjectId) {
+    const data = await query(GET_ORDER_RETURN_SHIPMENTS, { id: toOrderGid(orderId) });
+    if (!data.order) throw new Error(`Order not found: ${orderId}`);
+    let ids = [];
+    try { ids = JSON.parse(data.order.metafield?.value || '[]'); } catch { ids = []; }
+    if (!Array.isArray(ids)) ids = [];
+    if (ids.includes(metaobjectId)) return { changed: false };
+
+    const result = (await query(SET_ORDER_RETURN_SHIPMENTS, {
+      metafields: [{
+        ownerId: data.order.id,
+        namespace: '$app',
+        key: 'return_shipments',
+        type: 'list.metaobject_reference',
+        value: JSON.stringify([...ids, metaobjectId])
+      }]
+    })).metafieldsSet;
+    if (result.userErrors?.length) {
+      throw new Error(`metafieldsSet failed: ${result.userErrors.map((e) => e.message).join('; ')}`);
+    }
+    return { changed: true };
+  }
+  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails, createReverseDeliveryWithShipping, upsertReturnShipmentRecord, linkReturnShipmentToOrder };
 
 
   async function getReturnShipmentDetails(returnId) {
@@ -199,6 +266,10 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
         email: ret.order.email,
         phone: ret.order.phone,
         shippingAddress: ret.order.shippingAddress,
+        fulfillments: (ret.order.fulfillments || []).map((fulfillment) => ({
+          trackingInfo: (fulfillment.trackingInfo || []).map((t) => ({ number: t.number, company: t.company })),
+          lineItemIds: (fulfillment.fulfillmentLineItems?.nodes || []).map((n) => n.lineItem?.id).filter(Boolean)
+        })),
         fulfillmentOrders: ret.order.fulfillmentOrders.nodes.map((fo) => ({
           id: fo.id,
           assignedLocation: fo.assignedLocation,

@@ -279,3 +279,25 @@ test('a payload without a return id is rejected', async () => {
   const orchestrator = createReturnOrchestrator({ shopify: fakeShopify({ tags: [] }) });
   await assert.rejects(() => orchestrator.onReturnApproved({}), /admin_graphql_api_id/);
 });
+test('a real booking records the status in Shopify, and a failed sync does not undo the booking', async () => {
+  const calls = [];
+  const statusSync = { async recordBooking(job) { calls.push(job); return { synced: false, error: 'scope missing' }; } };
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['RedBox'] }), carriers: { redbox: fakeCarrier('redbox') }, statusSync
+  });
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
+  assert.equal(results[0].action, 'booked');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].trackingNumber, 'TRK1');
+  assert.equal(calls[0].reverseFulfillmentOrderId, DEFAULT_RFO);
+});
+
+test('a dry-run booking never touches the status record', async () => {
+  const calls = [];
+  const statusSync = { async recordBooking(job) { calls.push(job); return { synced: true }; } };
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['aramex'] }), carriers: { aramex: fakeCarrier('aramex', { dryRun: true }) }, statusSync
+  });
+  await orchestrator.onReturnApproved(approvedPayload);
+  assert.equal(calls.length, 0);
+});

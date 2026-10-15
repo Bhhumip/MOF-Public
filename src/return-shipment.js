@@ -51,6 +51,20 @@ function totalWeightKg(items, defaultItemWeightKg) {
     return { kg: Math.max(Number(total.toFixed(3)), 0.001), estimated };
 }
 
+// Tracking numbers on the outbound fulfillment(s) that carried the returned items.
+function collectOriginalTracking(fulfillments, returnedIds) {
+    const found = [];
+    for (const fulfillment of fulfillments || []) {
+        const carriesReturnedItem = (fulfillment.lineItemIds || []).some((id) => returnedIds.has(id));
+        if (!carriesReturnedItem) continue;
+        for (const info of fulfillment.trackingInfo || []) {
+            const number = String(info?.number ?? '').trim();
+            if (number) found.push({ number, company: String(info.company ?? '').trim() });
+        }
+    }
+    return found;
+}
+
 /**
  * Build the carrier-neutral object every adapter receives.
  * Throws ReturnShipmentError (with a code) when something every carrier
@@ -97,6 +111,7 @@ function buildReturnShipment({ returnId, reverseFulfillmentOrderId, details, def
         items: rfo.lineItems.map((item) => ({ sku: item.sku, name: item.name, quantity: item.quantity })),
         weight: kg == null ? null : { value: kg, unit: 'KG' },
         weightEstimated: estimated,
+        originalTracking: collectOriginalTracking(order.fulfillments, returnedIds),
     };
 }
 

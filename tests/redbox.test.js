@@ -1,7 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-    createRedboxClient, normalizeEvent, RedboxApiError, RedboxContractError
+    createRedboxClient,
+    pickOriginalTrackingNumber,
+    normalizeEvent,
+    RedboxApiError,
+    RedboxContractError
 } = require('../src/carriers/redbox');
 const contract = require('../src/carriers/redbox-contract');
 
@@ -40,6 +44,25 @@ function makeClient(fetchImpl, extra = {}) {
         fetchImpl, retryDelayMs: 0, logger: quiet, ...extra
     });
 }
+
+function strictClient(status) {
+    const calls = [];
+    const client = createRedboxClient({
+        endpoint: 'https://stage.example.test', bearerToken: 't', requireOriginalShipment: true, retries: 0,
+        logger: { warn() { }, log() { } },
+        fetchImpl: async (url, options) => {
+            calls.push(options.method);
+            return { ok: false, status, text: async () => JSON.stringify({ success: false, response_code: status, msg: 'x' }) };
+        }
+    });
+    return { client, calls };
+}
+const strictShipment = {
+    orderName: '#1', reverseFulfillmentOrderId: 'gid://shopify/ReverseFulfillmentOrder/5',
+    customer: { name: 'A', phone: '+966500000000' }, warehouse: { name: 'W' },
+    originalTracking: [{ number: '111', company: 'RedBox' }]
+};
+
 
 const shipment = {
     returnId: 'gid://shopify/Return/1',
@@ -371,14 +394,14 @@ test('normalizeEvent reads RedBox status_code and maps known statuses', () => {
 });
 
 test('unmapped statuses become unknown with the raw value preserved', () => {
-    const e = normalizeEvent({ status_code: 'locker_full' });
+    const e = normalizeEvent({ status_code: 'LOCKER_FULL' });
     assert.equal(e.event, 'unknown');
     assert.equal(e.rawStatus, 'locker_full');
     assert.equal(normalizeEvent({}).event, 'unknown');
 });
 
 test('documented RedBox statuses map as intended; undefined ones stay unknown', () => {
-    const { normalizeEvent } = require('../src/carriers/redbox');
+
     const expected = {
         Processing: 'created', 'In-Transit': 'in_transit', Deposited: 'deposited',
         Delivered: 'delivered', Returned: 'returned', Expired: 'expired', Canceled: 'cancelled'
@@ -386,11 +409,11 @@ test('documented RedBox statuses map as intended; undefined ones stay unknown', 
     for (const [status, event] of Object.entries(expected)) {
         assert.equal(normalizeEvent({ status_code: status }).event, event, status);
     }
-    for (const status of ['R-Deposited', 'In-transit-r', 'In-transit-ex', 'Not-Delivered', 'NotDeposited']) {
-        const result = normalizeEvent({ status_code: status });
-        assert.equal(result.event, 'unknown', status);
-        assert.equal(result.rawStatus, status.toLowerCase());
+    const nowMapped = { 'R-Deposited': 'deposited', 'In-transit-r': 'in_transit', 'In-transit-ex': 'returning_to_origin', 'Not-Delivered': 'returned_to_origin', NotDeposited: 'exception', 'Not-Deposited': 'exception' };
+    for (const [status, event] of Object.entries(nowMapped)) {
+        assert.equal(normalizeEvent({ status_name: status }).event, event, status);
     }
+    assert.equal(normalizeEvent({ status_name: 'Locker full' }).event, 'unknown');
 });
 
 test('phone numbers are sent without spaces or punctuation', () => {
@@ -416,7 +439,7 @@ test('tracking page: the real sandbox field names are understood', () => {
 });
 
 test('the real sandbox status R-Waiting maps to created even when status_code is numeric', () => {
-    const { normalizeEvent } = require('../src/carriers/redbox');
+
     assert.equal(normalizeEvent({ status_name: 'R-Waiting', status_code: 202 }).event, 'created');
 });
 
@@ -427,4 +450,25 @@ test('status selection: textual code first, then name, numeric code last', () =>
     assert.equal(pickStatus({ status_code: '202', status_name: 'R-Waiting' }), 'R-Waiting');
     assert.equal(pickStatus({ status_code: 202 }), 202);
     assert.equal(pickStatus({}), null);
+});
+
+test('strict mode: an unknown original shipment is refused and nothing is POSTed', async () => {
+    const { client, calls } = strictClient(404);
+    await assert.rejects(() => client.createReturnShipment(strictShipment), (e) => e.code === 'original_shipment_not_found');
+    assert.equal(calls.every((method) => method === 'GET'), true);
+});
+
+test('strict mode: a RedBox outage during lookup is not mistaken for "not found"', async () => {
+    const { client } = strictClient(500);
+    await assert.rejects(() => client.createReturnShipment(strictShipment), (e) => e.status === 500);
+});
+
+test('two different outbound tracking numbers are ambiguous', () => {
+    assert.equal(pickOriginalTrackingNumber([{ number: '1', company: 'RedBox' }, { number: '1', company: 'RedBox' }]), '1');
+    assert.equal(pickOriginalTrackingNumber([{ number: '1', company: 'Other' }, { number: '2', company: 'RedBox' }]), '2');
+    assert.equal(pickOriginalTrackingNumber([]), null);
+    assert.throws(
+        () => pickOriginalTrackingNumber([{ number: '1', company: 'RedBox' }, { number: '2', company: 'RedBox' }]),
+        (e) => e.code === 'multiple_original_shipments'
+    );
 });

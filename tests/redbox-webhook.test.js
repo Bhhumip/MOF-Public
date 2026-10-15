@@ -211,3 +211,30 @@ test('a handler cannot be built without verification or a store', () => {
     assert.throws(() => createRedboxWebhookHandler({ jobStore: {} }), /verify/);
     assert.throws(() => createRedboxWebhookHandler({ verify: () => true }), /jobStore/);
 });
+
+
+test('maps RedBox return-specific statuses', async () => {
+    const { handle, jobStore } = await setup();
+
+    await post(handle, evt({
+        status_code: 'R-Deposited',
+        status_name: 'R-Deposited',
+        date: '2026-10-14T08:00:00Z'
+    }));
+
+    assert.equal(
+        (await jobStore.get('rfo:5')).carrierStatus,
+        'deposited'
+    );
+
+    await post(handle, evt({
+        status_code: 'In-Transit-R',
+        status_name: 'In-Transit-R',
+        date: '2026-10-14T09:00:00Z'
+    }));
+
+    assert.equal(
+        (await jobStore.get('rfo:5')).carrierStatus,
+        'in_transit'
+    );
+});

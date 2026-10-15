@@ -14,7 +14,8 @@ function createReturnOrchestrator({
   carriers = {},
   manualReviewQueue = null,
   jobStore = createMemoryJobStore(),
-  defaultItemWeightKg = null
+  defaultItemWeightKg = null,
+  statusSync
 } = {}) {
   async function enqueueForReview(record) {
     if (manualReviewQueue) await manualReviewQueue.enqueue(record);
@@ -101,15 +102,42 @@ function createReturnOrchestrator({
       }
 
       const action = booking.dryRun ? 'dry_run' : 'booked';
-      await jobStore.update(key, { status: action, trackingNumber: booking.trackingNumber });
+      await jobStore.update(key, {
+        status: action,
+        trackingNumber: booking.trackingNumber,
+        trackingUrl: booking.trackingUrl || null
+      });
+
+      // Make the status visible inside Shopify. Best effort: never fails the booking.
+      if (statusSync && !booking.dryRun) {
+        const sync = await statusSync.recordBooking({
+          reverseFulfillmentOrderId,
+          returnId,
+          orderId: order.id,
+          orderName: order.name,
+          carrier: match.carrier,
+          trackingNumber: booking.trackingNumber,
+          trackingUrl: booking.trackingUrl || null
+        });
+        if (!sync.synced && sync.error) await jobStore.update(key, { statusSyncError: sync.error });
+      }
       return {
         carrier: match.carrier,
         action,
         reverseFulfillmentOrderId,
         matchedOn: match.matchedOn,
-        trackingNumber: booking.trackingNumber
+        trackingNumber: booking.trackingNumber,
+        trackingUrl: booking.trackingUrl || null
       };
     } catch (error) {
+      const REVIEW_CODES = ['invalid_shipment', 'original_shipment_not_found', 'multiple_original_shipments'];
+      if (REVIEW_CODES.includes(error.code)) {
+        await jobStore.update(key, { status: 'manual_review', reason: error.code });
+        return enqueueForReview({
+          returnId, reverseFulfillmentOrderId, reason: error.code, matchedOn: match.matchedOn,
+          ...(error.missing ? { missing: error.missing } : {})
+        });
+      }
       await jobStore.update(key, { status: 'failed', error: error.message });
       throw error;
     }
