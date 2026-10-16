@@ -182,3 +182,15 @@ test('linkReturnShipmentToOrder appends once and never duplicates', async () => 
     assert.deepEqual(await again.client.linkReturnShipmentToOrder('9', 'gid://shopify/Metaobject/1'), { changed: false });
     assert.equal(again.calls.length, 1);
 });
+
+test('addOrderTags sends only the tags to add', async () => {
+    const { client, calls } = clientReturning({ data: { tagsAdd: { node: { id: 'gid://shopify/Order/9' }, userErrors: [] } } });
+    await client.addOrderTags('9', ['Return-Received']);
+    assert.equal(calls[0].variables.id, 'gid://shopify/Order/9');
+    assert.deepEqual(calls[0].variables.tags, ['Return-Received']);
+});
+
+test('addOrderTags throws on userErrors', async () => {
+    const { client } = clientReturning({ data: { tagsAdd: { node: null, userErrors: [{ message: 'nope' }] } } });
+    await assert.rejects(() => client.addOrderTags('9', ['x']), /nope/);
+});

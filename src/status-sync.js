@@ -28,6 +28,14 @@ function baseFields(job) {
     };
 }
 
+// The moments staff must act on. Tags can be filtered in the order list.
+const MILESTONE_TAGS = Object.freeze({
+    returned: 'Return-Received',
+    expired: 'Return-Attention',
+    exception: 'Return-Attention',
+    cancelled: 'Return-Attention'
+});
+
 /**
  * Writes the carrier status into Shopify (metaobject per shipment + a link on the order).
  * Best effort: it never throws, so a Shopify hiccup cannot fail or undo a booking.
@@ -64,6 +72,8 @@ function createStatusSync({ shopify, enabled = false, logger = console } = {}) {
                     status_raw: event.raw?.status_name ?? event.rawStatus,
                     last_event_at: toDateTime(event.occurredAt)
                 });
+                const tag = MILESTONE_TAGS[event.event];
+                if (tag && job.orderId) await shopify.addOrderTags(job.orderId, [tag]);
             });
         }
     };

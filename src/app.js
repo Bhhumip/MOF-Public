@@ -32,12 +32,28 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
     ? createRedboxWebhookHandler({
       verify: verifyBearerToken({ secret: rb.webhookSecret }),
       jobStore,
-      onEvent: async (event, job) => {
-        // An older event leaves carrierStatus unchanged: skip it, so Shopify never shows a stale status.
-        const fresh = await jobStore.get(job.key);
-        if (!fresh || fresh.carrierStatus !== event.event) return;
+      // onEvent: async (event, job) => {
+      //   // An older event leaves carrierStatus unchanged: skip it, so Shopify never shows a stale status.
+      //   const fresh = await jobStore.get(job.key);
+      //   if (!fresh || fresh.carrierStatus !== event.event) return;
 
-        await statusSync.recordEvent(fresh, event);
+      //   await statusSync.recordEvent(fresh, event);
+
+      //   if (['expired', 'exception', 'cancelled'].includes(event.event)) {
+      //     console.warn(`[ops] ${fresh.key}: RedBox status "${event.rawStatus}" (${event.event})`);
+      //     await jobStore.update(fresh.key, { needsAttention: event.event });
+      //   }
+      //   if (event.event === 'returned') {
+      //     await jobStore.update(fresh.key, { awaitingInspection: true, returnedAt: event.occurredAt });
+      //   }
+      // }
+      onEvent: async (event, job) => {
+        const fresh = await jobStore.get(job.key);
+        if (!fresh || fresh.carrierStatus !== event.event) return; // an older event: the job already moved on
+
+        const sync = await statusSync.recordEvent(fresh, event);
+        if (sync.error) await jobStore.update(fresh.key, { statusSyncError: sync.error });
+        else if (sync.synced && fresh.statusSyncError) await jobStore.update(fresh.key, { statusSyncError: null });
 
         if (['returned', 'expired', 'exception', 'cancelled'].includes(event.event)) {
           console.warn(`[ops] ${fresh.key}: RedBox status "${event.rawStatus}" (${event.event})`);
@@ -129,6 +145,7 @@ function start() {
   console.log(`RedBox base URL: ${config.carriers.redbox.endpoint || '(not set)'}`);
   console.log(`Aramex base URL: ${config.carriers.aramex.endpoint || '(not set)'}`);
   const server = createServer({ config });
+  console.log(`Status sync: ${config.shopify.statusSync ? 'ON' : 'OFF'}`);
   server.listen(config.port, () => {
     console.log(`Returns middleware listening on port ${config.port}`);
   });

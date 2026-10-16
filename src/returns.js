@@ -84,7 +84,11 @@ function createReturnOrchestrator({
 
     try {
       const booking = await adapter.createReturnShipment(returnShipment, { idempotencyKey: key });
-
+      await jobStore.update(key, {
+        shipmentId: booking.shipmentId || null,
+        trackingNumber: booking.trackingNumber,
+        trackingUrl: booking.trackingUrl || null
+      });
       // A dry-run booking has a fake tracking number: never write it to Shopify.
       if (shopify && !booking.dryRun) {
         await shopify.createReverseDeliveryWithShipping({
@@ -130,7 +134,7 @@ function createReturnOrchestrator({
         trackingUrl: booking.trackingUrl || null
       };
     } catch (error) {
-      const REVIEW_CODES = ['invalid_shipment', 'original_shipment_not_found', 'multiple_original_shipments'];
+      const REVIEW_CODES = ['invalid_shipment', 'original_shipment_not_found', 'multiple_original_shipments', 'original_shipment_rejected'];
       if (REVIEW_CODES.includes(error.code)) {
         await jobStore.update(key, { status: 'manual_review', reason: error.code });
         return enqueueForReview({

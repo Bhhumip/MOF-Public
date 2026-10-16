@@ -224,7 +224,7 @@ test('maps RedBox return-specific statuses', async () => {
 
     assert.equal(
         (await jobStore.get('rfo:5')).carrierStatus,
-        'deposited'
+        'dropped_off'
     );
 
     await post(handle, evt({
@@ -235,6 +235,6 @@ test('maps RedBox return-specific statuses', async () => {
 
     assert.equal(
         (await jobStore.get('rfo:5')).carrierStatus,
-        'in_transit'
+        'collected_from_point'
     );
 });

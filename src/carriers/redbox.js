@@ -47,8 +47,8 @@ const STATUS_EVENT_MAP = Object.freeze({
   not_delivered: 'returned_to_origin',
   not_deposited: 'exception',      // portal spelling
   notdeposited: 'exception',       // API-doc spelling (no hyphen)
-  r_deposited: 'deposited',        // customer dropped the return off
-  in_transit_r: 'in_transit',      // return collected from the locker
+  r_deposited: 'dropped_off',        // customer dropped the return off
+  in_transit_r: 'collected_from_point',      // return collected from the locker
 });
 
 class RedboxApiError extends Error {
@@ -308,7 +308,19 @@ function createRedboxClient(config = {}) {
     try {
       created = await request('/shipments/returns', { method: 'POST', body });
     } catch (error) {
+      if (error instanceof RedboxApiError && body.original_shipment_id && [400, 404].includes(error.status)) {
+        throw new RedboxContractError(
+          'original_shipment_rejected',
+          `RedBox rejected the return: ${error.body?.msg ?? error.message}`,
+          { status: error.status }
+        );
+      }
       if (!(error instanceof RedboxApiError) || error.status !== 409) throw error;
+      logger.log(
+        `[redbox] POST /shipments/returns ${body.original_shipment_id
+          ? JSON.stringify(body)
+          : `(external return; fields: ${Object.keys(body).join(', ')})`}`
+      );
       created = await findShipmentByReference(body.reference);
       if (!created) {
         throw new RedboxApiError(

@@ -112,6 +112,31 @@ const SET_ORDER_RETURN_SHIPMENTS = `
   }
 `;
 
+const GET_RFO_LINE_ITEMS = `
+  query GetRfoLineItems($id: ID!) {
+    reverseFulfillmentOrder(id: $id) {
+      id
+      lineItems(first: 50) { nodes { id totalQuantity dispositions { quantity type } } }
+    }
+  }`;
+
+const REVERSE_FULFILLMENT_ORDER_DISPOSE = `
+  mutation Dispose($dispositionInputs: [ReverseFulfillmentOrderDisposeInput!]!) {
+    reverseFulfillmentOrderDispose(dispositionInputs: $dispositionInputs) {
+      reverseFulfillmentOrderLineItems { id totalQuantity dispositions { quantity type } }
+      userErrors { field message }
+    }
+  }`;
+
+const ADD_TAGS = `
+  mutation AddTags($id: ID!, $tags: [String!]!) {
+    tagsAdd(id: $id, tags: $tags) {
+      node { id }
+      userErrors { message }
+    }
+  }
+`;
+
 function toOrderGid(orderId) {
   const value = String(orderId ?? '').trim();
   if (!value) throw new Error('An order ID is required');
@@ -248,7 +273,31 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
     }
     return { changed: true };
   }
-  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails, createReverseDeliveryWithShipping, upsertReturnShipmentRecord, linkReturnShipmentToOrder };
+
+  async function restockReverseFulfillmentOrder({ reverseFulfillmentOrderId, locationId }) {
+    if (!locationId) throw new Error('A restock location ID is required');
+    const data = await query(GET_RFO_LINE_ITEMS, { id: reverseFulfillmentOrderId });
+    const nodes = data.reverseFulfillmentOrder?.lineItems?.nodes || [];
+    const dispositionInputs = nodes
+      .map((n) => ({
+        reverseFulfillmentOrderLineItemId: n.id,
+        quantity: n.totalQuantity - n.dispositions.reduce((sum, d) => sum + d.quantity, 0),
+        dispositionType: 'RESTOCKED',
+        locationId
+      }))
+      .filter((i) => i.quantity > 0);
+    if (!dispositionInputs.length) return { restocked: 0 };
+    const result = (await query(REVERSE_FULFILLMENT_ORDER_DISPOSE, { dispositionInputs })).reverseFulfillmentOrderDispose;
+    if (result.userErrors?.length) throw new Error(`reverseFulfillmentOrderDispose failed: ${result.userErrors.map((e) => e.message).join('; ')}`);
+    return { restocked: dispositionInputs.length };
+  }
+
+  async function addOrderTags(orderId, tags) {
+    const data = await query(ADD_TAGS, { id: toOrderGid(orderId), tags });
+    const errors = data.tagsAdd.userErrors;
+    if (errors?.length) throw new Error(`tagsAdd failed: ${errors.map((e) => e.message).join('; ')}`);
+  }
+  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails, createReverseDeliveryWithShipping, upsertReturnShipmentRecord, linkReturnShipmentToOrder, restockReverseFulfillmentOrder, addOrderTags };
 
 
   async function getReturnShipmentDetails(returnId) {
@@ -291,4 +340,4 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
 
 }
 
-module.exports = { createShopifyClient, toOrderGid, GET_ORDER_SHIPPING };
+module.exports = { createShopifyClient, toOrderGid, GET_ORDER_SHIPPING, ADD_TAGS };

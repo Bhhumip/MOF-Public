@@ -409,7 +409,7 @@ test('documented RedBox statuses map as intended; undefined ones stay unknown', 
     for (const [status, event] of Object.entries(expected)) {
         assert.equal(normalizeEvent({ status_code: status }).event, event, status);
     }
-    const nowMapped = { 'R-Deposited': 'deposited', 'In-transit-r': 'in_transit', 'In-transit-ex': 'returning_to_origin', 'Not-Delivered': 'returned_to_origin', NotDeposited: 'exception', 'Not-Deposited': 'exception' };
+    const nowMapped = { 'R-Deposited': 'dropped_off', 'In-transit-r': 'collected_from_point', 'In-transit-ex': 'returning_to_origin', 'Not-Delivered': 'returned_to_origin', NotDeposited: 'exception', 'Not-Deposited': 'exception' };
     for (const [status, event] of Object.entries(nowMapped)) {
         assert.equal(normalizeEvent({ status_name: status }).event, event, status);
     }
@@ -470,5 +470,16 @@ test('two different outbound tracking numbers are ambiguous', () => {
     assert.throws(
         () => pickOriginalTrackingNumber([{ number: '1', company: 'RedBox' }, { number: '2', company: 'RedBox' }]),
         (e) => e.code === 'multiple_original_shipments'
+    );
+});
+
+test('RedBox refusing an internal return is a review case, not a generic failure', async () => {
+    const fetchImpl = routed({
+        'GET /v3/shipments/00099': res(200, { shipment: { id: 'orig-1', tracking_number: '00099', is_return: false }, success: true }),
+        [POST_RETURNS]: res(404, { success: false, msg: 'Not Found: Shipment not exist' })
+    });
+    await assert.rejects(
+        () => makeClient(fetchImpl).createReturnShipment({ ...shipment, originalTrackingNumber: '00099' }),
+        (e) => e.code === 'original_shipment_rejected'
     );
 });
