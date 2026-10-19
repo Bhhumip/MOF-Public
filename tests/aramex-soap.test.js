@@ -89,3 +89,73 @@ test('SOAP fault parser returns null when there is no fault', () => {
         null
     );
 });
+
+test('SOAP transport: a fault inside an HTTP 500 reports the fault reason, not just the status', async () => {
+    const transport = createAramexSoapTransport({
+        endpoint: 'https://example.invalid/Service_1_0.svc',
+        fetchImpl: async () => ({
+            ok: false,
+            status: 500,
+            async text() {
+                return '<s:Envelope><s:Body><s:Fault><faultstring>Bad request XML</faultstring></s:Fault></s:Body></s:Envelope>';
+            }
+        })
+    });
+
+    await assert.rejects(
+        () => transport.call('CreateShipments', 'ShipmentCreationRequest', {}),
+        (error) => /Bad request XML/.test(error.message) && error.code === 'soap_fault' && error.outcomeUnknown === false
+    );
+});
+
+test('SOAP transport: HTTP 5xx without a fault leaves the outcome unknown', async () => {
+    const transport = createAramexSoapTransport({
+        endpoint: 'https://example.invalid/Service_1_0.svc',
+        fetchImpl: async () => ({ ok: false, status: 503, async text() { return 'Service Unavailable'; } })
+    });
+
+    await assert.rejects(
+        () => transport.call('CreateShipments', 'ShipmentCreationRequest', {}),
+        (error) => error.code === 'http_error' && error.status === 503 && error.outcomeUnknown === true
+    );
+});
+
+test('SOAP transport: HTTP 4xx is a clean failure', async () => {
+    const transport = createAramexSoapTransport({
+        endpoint: 'https://example.invalid/Service_1_0.svc',
+        fetchImpl: async () => ({ ok: false, status: 404, async text() { return 'Not found'; } })
+    });
+
+    await assert.rejects(
+        () => transport.call('CreateShipments', 'ShipmentCreationRequest', {}),
+        (error) => error.status === 404 && error.outcomeUnknown === false
+    );
+});
+
+test('SOAP transport: a timeout is flagged outcomeUnknown', async () => {
+    const transport = createAramexSoapTransport({
+        endpoint: 'https://example.invalid/Service_1_0.svc',
+        timeoutMs: 5,
+        // Like real fetch: never answers, rejects with AbortError when the signal fires.
+        fetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+        })
+    });
+
+    await assert.rejects(
+        () => transport.call('CreateShipments', 'ShipmentCreationRequest', {}),
+        (error) => error.code === 'timeout' && error.outcomeUnknown === true && /timed out/.test(error.message)
+    );
+});
+
+test('SOAP transport: a dropped connection is flagged outcomeUnknown', async () => {
+    const transport = createAramexSoapTransport({
+        endpoint: 'https://example.invalid/Service_1_0.svc',
+        fetchImpl: async () => { throw new TypeError('fetch failed'); }
+    });
+
+    await assert.rejects(
+        () => transport.call('CreateShipments', 'ShipmentCreationRequest', {}),
+        (error) => error.code === 'network_error' && error.outcomeUnknown === true
+    );
+});

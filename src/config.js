@@ -52,6 +52,16 @@ function assertNotProductionEndpoint(name, endpoint) {
   }
 }
 
+// "LxWxH" in centimetres, e.g. "10x10x10". Returns null when unset.
+function parseParcelDimensions(value) {
+  if (!value) return null;
+  const parts = String(value).toLowerCase().split('x').map((part) => Number(part.trim()));
+  if (parts.length !== 3 || parts.some((part) => !(part > 0))) {
+    throw new Error('ARAMEX_PARCEL_CM must look like 10x10x10 (length x width x height, in cm)');
+  }
+  const [length, width, height] = parts;
+  return { length, width, height };
+}
 
 function getConfig(env = process.env) {
   const port = Number(env.PORT || 3000);
@@ -124,6 +134,18 @@ function getConfig(env = process.env) {
         accountCountryCode: env.ARAMEX_ACCOUNT_COUNTRY_CODE || null,
 
         source: Number(env.ARAMEX_SOURCE || 24),
+
+        // Domestic = DOM/OND; international = EXP plus a type such as PPX (manual, Appendix A).
+        productGroup: env.ARAMEX_PRODUCT_GROUP || 'DOM',
+        productType: env.ARAMEX_PRODUCT_TYPE || 'OND',
+        // Who pays. Placeholder until the client confirms: P, C (+ ARCC/ASCC) or 3.
+        paymentType: env.ARAMEX_PAYMENT_TYPE || 'P',
+        paymentOptions: env.ARAMEX_PAYMENT_OPTIONS || '',
+        // Parcel size sent with every return (Shopify does not provide it).
+        dimensionsCm: parseParcelDimensions(env.ARAMEX_PARCEL_CM),
+        // Used when Shopify has no phone/e-mail for the warehouse location.
+        warehousePhone: env.ARAMEX_WAREHOUSE_PHONE || null,
+        warehouseEmail: env.ARAMEX_WAREHOUSE_EMAIL || null,
 
         trackingMode: env.ARAMEX_TRACKING_MODE || 'poll',
         pollIntervalMs: Number(

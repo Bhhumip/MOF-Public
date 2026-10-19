@@ -70,3 +70,30 @@ test('unsupported job storage types are rejected', () => {
         /JOB_STORE must be one of/
     );
 });
+test('Aramex defaults to a domestic DOM/OND shipment', () => {
+    const aramex = getConfig(base).carriers.aramex;
+
+    assert.equal(aramex.productGroup, 'DOM');
+    assert.equal(aramex.productType, 'OND');
+    assert.equal(aramex.dimensionsCm, null);
+});
+
+test('Aramex product, payment and parcel size come from the environment', () => {
+    const aramex = getConfig({
+        ...base,
+        ARAMEX_PRODUCT_GROUP: 'EXP',
+        ARAMEX_PRODUCT_TYPE: 'PPX',
+        ARAMEX_PAYMENT_TYPE: 'C',
+        ARAMEX_PAYMENT_OPTIONS: 'ARCC',
+        ARAMEX_PARCEL_CM: '30x20x10'
+    }).carriers.aramex;
+
+    assert.equal(aramex.productGroup, 'EXP');
+    assert.equal(aramex.paymentType, 'C');
+    assert.equal(aramex.paymentOptions, 'ARCC');
+    assert.deepEqual(aramex.dimensionsCm, { length: 30, width: 20, height: 10 });
+});
+
+test('a malformed ARAMEX_PARCEL_CM is rejected', () => {
+    assert.throws(() => getConfig({ ...base, ARAMEX_PARCEL_CM: '10x10' }), /ARAMEX_PARCEL_CM/);
+});

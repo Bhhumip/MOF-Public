@@ -2,7 +2,8 @@
 
 const name = 'aramex';
 const { createAramexSoapTransport, AramexSoapError } = require('./aramex-soap');
-
+const { buildShipment, toParty, AramexContractError } = require('./aramex-contract');
+const { parseXml, child, children, descendant, childText } = require('./aramex-xml');
 const STATUS_EVENT_MAP = Object.freeze({
   sh001: 'created',
   sh002: 'picked_up',
@@ -15,12 +16,18 @@ const STATUS_EVENT_MAP = Object.freeze({
 });
 
 class AramexApiError extends Error {
-  constructor(message, { operation, body, status } = {}) {
+  // code: 'carrier_rejected' (Aramex said HasErrors=true), 'incomplete_response',
+  //       or a transport code ('timeout', 'network_error', 'soap_fault', 'http_error').
+  // outcomeUnknown: true when the request may have created a shipment even though we
+  //       got no clean answer. The orchestrator sends these to manual review.
+  constructor(message, { operation, body, status, code, outcomeUnknown = false } = {}) {
     super(message);
     this.name = 'AramexApiError';
     this.operation = operation;
     this.body = body;
     this.status = status;
+    this.code = code;
+    this.outcomeUnknown = outcomeUnknown;
   }
 }
 
@@ -49,134 +56,73 @@ function normalizeEvent(raw = {}) {
   };
 }
 
-// Maps a neutral party descriptor to Aramex's Shipper or Consignee structure.
-function toParty(party = {}) {
-  return {
-    Reference1: party.reference || '',
-    AccountNumber: '',
-    PartyAddress: {
-      Line1: party.line1 || '',
-      Line2: party.line2 || '',
-      Line3: party.line3 || '',
-      City: party.city || '',
-      StateOrProvinceCode: party.state || '',
-      CountryCode: party.countryCode || '',
-      PostCode: party.postCode || ''
-    },
-    Contact: {
-      Department: '',
-      PersonName: party.name || '',
-      Title: '',
-      CompanyName: party.company || '',
-      PhoneNumber1: party.phone || '',
-      PhoneNumber1Ext: '',
-      PhoneNumber2: '',
-      PhoneNumber2Ext: '',
-      FaxNumber: '',
-      CellPhone: party.mobile || '',
-      EmailAddress: party.email || '',
-      Type: ''
-    }
-  };
+
+function parseBoolean(text) {
+  if (text == null) return null;
+  const value = text.toLowerCase();
+  if (value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  return null;
 }
 
-// Extracts simple text values from a SOAP response, allowing namespace prefixes.
-function getXmlText(xml, elementName) {
-  const escapedName = elementName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const expression = new RegExp(
-    `<(?:[\\w.-]+:)?${escapedName}\\b[^>]*>([\\s\\S]*?)<\\/(?:[\\w.-]+:)?${escapedName}\\s*>`,
-    'i'
-  );
-  const match = xml.match(expression);
-
-  if (!match) return null;
-
-  return match[1]
-    .replace(/<[^>]+>/g, '')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, '&')
-    .trim();
+// <Notifications><Notification><Code/><Message/></Notification>...</Notifications>
+function parseNotifications(node) {
+  return children(node, 'Notification').map((entry) => ({
+    code: childText(entry, 'Code') || null,
+    message: childText(entry, 'Message') || null
+  }));
 }
 
-// Converts the common shipment-creation response fields while retaining the original XML.
+/**
+ * Parse a CreateShipments response (WSDL: ShipmentCreationResponse).
+ *
+ *   ShipmentCreationResponse
+ *     HasErrors, Notifications            <- request level
+ *     Shipments > ProcessedShipment*
+ *       ID, Reference1, HasErrors, Notifications   <- shipment level
+ *       ShipmentLabel > LabelURL, LabelFileContents
+ *
+ * Request-level and shipment-level fields are read as DIRECT children, so the
+ * two HasErrors flags and the two Notifications lists can never be mixed up.
+ * A field that is missing or marked nil comes back as null (never as false).
+ */
 function parseShipmentCreationResponse(xml) {
-  // Extract the response wrapper so shipment-level fields cannot be
-  // mistaken for fields belonging to the overall response.
-  const responseMatch = xml.match(
-    /<(?:[\w.-]+:)?ShipmentCreationResponse\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?ShipmentCreationResponse\s*>/i
-  );
+  const response = descendant(parseXml(xml), 'ShipmentCreationResponse');
 
-  const responseXml = responseMatch?.[1] || '';
-
-  // Exclude the Shipments container before reading the overall HasErrors flag.
-  const responseWithoutShipments = responseXml
-    .replace(
-      /<(?:[\w.-]+:)?Shipments\b[^>]*>[\s\S]*?<\/(?:[\w.-]+:)?Shipments\s*>/i,
-      ''
-    )
-    .replace(
-      /<(?:[\w.-]+:)?Shipments\b[^>]*\/\s*>/i,
-      ''
-    );
-
-  const hasErrorsText = getXmlText(
-    responseWithoutShipments,
-    'HasErrors'
-  );
-  const hasErrors = hasErrorsText === null
-    ? null
-    : hasErrorsText.toLowerCase() === 'true';
-
-  const processedShipmentMatch = xml.match(
-    /<(?:[\w.-]+:)?ProcessedShipment\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?ProcessedShipment\s*>/i
-  );
-  const processedShipmentXml = processedShipmentMatch?.[1] || '';
-  // Read the individual shipment status as well as the overall response status.
-  const shipmentHasErrorsText = getXmlText(
-    processedShipmentXml,
-    'HasErrors'
-  );
-
-  const shipmentHasErrors = shipmentHasErrorsText === null
-    ? null
-    : shipmentHasErrorsText.toLowerCase() === 'true';
-
-  const trackingNumber = getXmlText(processedShipmentXml, 'ID');
-  const trackingUrl = getXmlText(processedShipmentXml, 'LabelURL');
-  const label = getXmlText(processedShipmentXml, 'LabelFileContents');
-
-  const notifications = [];
-  const notificationExpression =
-    /<(?:[\w.-]+:)?Notification\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?Notification\s*>/gi;
-
-  for (const match of xml.matchAll(notificationExpression)) {
-    const message = getXmlText(match[1], 'Message');
-    const code = getXmlText(match[1], 'Code');
-
-    notifications.push({ code, message });
-  }
+  const processedShipments = children(child(response, 'Shipments'), 'ProcessedShipment').map((node) => {
+    const label = child(node, 'ShipmentLabel');
+    return {
+      ID: childText(node, 'ID') || null,
+      Reference1: childText(node, 'Reference1') || null,
+      HasErrors: parseBoolean(childText(node, 'HasErrors')),
+      Notifications: parseNotifications(child(node, 'Notifications')),
+      LabelURL: childText(label, 'LabelURL') || null,
+      LabelFileContents: childText(label, 'LabelFileContents') || null
+    };
+  });
 
   return {
     carrier: name,
-    HasErrors: hasErrors,
-    Notifications: notifications,
-    ProcessedShipments: processedShipmentMatch
-      ? [{
-        ID: trackingNumber,
-        LabelURL: trackingUrl,
-        LabelFileContents: label,
-        LabelFileContents: label,
-        HasErrors: shipmentHasErrors
-      }]
-      : [],
-    trackingNumber,
-    trackingUrl,
-    label,
+    HasErrors: parseBoolean(childText(response, 'HasErrors')),
+    Notifications: parseNotifications(child(response, 'Notifications')),
+    ProcessedShipments: processedShipments,
     rawXml: xml
   };
+}
+
+// One request carries one shipment, but match by our reference when several come back.
+function pickProcessedShipment(processedShipments, reference) {
+  return processedShipments.find((entry) => reference && entry.Reference1 === reference)
+    ?? processedShipments[0]
+    ?? null;
+}
+
+// "ERR01 Invalid account; ERR30 Line1 is empty": the reasons Aramex gave, in one line.
+function describeNotifications(notifications) {
+  return notifications
+    .map((entry) => [entry.code, entry.message].filter(Boolean).join(' '))
+    .filter(Boolean)
+    .join('; ');
 }
 
 function createAramexClient(config = {}) {
@@ -189,6 +135,14 @@ function createAramexClient(config = {}) {
     accountPin,
     accountEntity,
     accountCountryCode,
+    source = 24,
+    productGroup,
+    productType,
+    paymentType,
+    paymentOptions,
+    dimensionsCm,
+    warehousePhone,
+    warehouseEmail,
     fetchImpl = globalThis.fetch,
     timeoutMs = 20000
   } = config;
@@ -217,61 +171,31 @@ function createAramexClient(config = {}) {
       AccountNumber: accountNumber || '',
       AccountPin: accountPin || '',
       AccountEntity: accountEntity || '',
-      AccountCountryCode: accountCountryCode || ''
+      AccountCountryCode: accountCountryCode || '',
+      Source: source
     };
   }
 
   return {
     name,
 
-    async createReturnShipment({
-      returnId,
-      customer,
-      warehouse,
-      items = [],
-      weight,
-      description,
-      productGroup = 'DOM',
-      productType = 'PDX',
-      paymentType = 'P',
-      pickupDate
-    } = {}) {
-      const shippingDateTime = pickupDate || new Date().toISOString();
+    // Receives the carrier-neutral returnShipment built by return-shipment.js.
+    // The mapping and the required-field checks live in aramex-contract.js.
+    async createReturnShipment(returnShipment = {}) {
+      // May throw AramexContractError('invalid_shipment', { missing }) before any
+      // network call; the orchestrator routes that to manual review.
+      const shipment = buildShipment(returnShipment, {
+        // Only defined values are passed, so the contract defaults still apply.
+        ...(productGroup && { productGroup }),
+        ...(productType && { productType }),
+        ...(paymentType && { paymentType }),
+        ...(paymentOptions != null && { paymentOptions }),
+        ...(dimensionsCm && { dimensionsCm }),
+        fallbackPhone: warehousePhone,
+        fallbackEmail: warehouseEmail
+      });
+      const returnId = returnShipment.returnId;
 
-      const shipment = {
-        Reference1: returnId || '',
-        Reference2: '',
-        Reference3: '',
-        Shipper: toParty(customer),
-        Consignee: toParty(warehouse),
-        ThirdParty: {},
-        ShippingDateTime: shippingDateTime,
-        DueDate: shippingDateTime,
-        Comments: `Return ${returnId || ''}`.trim(),
-        PickupLocation: '',
-        OperationsInstructions: '',
-        PaymentType: paymentType,
-        Details: {
-          Dimensions: null,
-          ActualWeight: {
-            Value: weight ?? 0,
-            Unit: 'KG'
-          },
-          ChargeableWeight: null,
-          DescriptionOfGoods: description || 'Returned goods',
-          GoodsOriginCountry: customer?.countryCode || '',
-          NumberOfPieces: items.length || 1,
-          ProductGroup: productGroup,
-          ProductType: productType,
-          PaymentOptions: '',
-          CashOnDeliveryAmount: null,
-          InsuranceAmount: null,
-          CashAdditionalAmount: null,
-          CashAdditionalAmountDescription: '',
-          CustomsValueAmount: null,
-          Items: items
-        }
-      };
 
       const request = {
         ClientInfo: clientInfo(),
@@ -295,36 +219,61 @@ function createAramexClient(config = {}) {
         );
 
         const result = parseShipmentCreationResponse(xml);
+        const processedShipment = pickProcessedShipment(result.ProcessedShipments, returnId);
+        const notifications = [
+          ...result.Notifications,
+          ...(processedShipment?.Notifications ?? [])
+        ];
+        const reasons = describeNotifications(notifications);
+        const failureMessage =
+          'Aramex CreateShipments returned an incomplete or unsuccessful shipment response' +
+          (reasons ? `: ${reasons}` : '');
 
-        // A shipment must not be reported as successful unless the overall
-        // response and the individual shipment both explicitly report no errors.
-        const processedShipment = result.ProcessedShipments[0];
+        // 1. Aramex said no (either level). Nothing was created, so a retry cannot duplicate.
+        if (result.HasErrors === true || processedShipment?.HasErrors === true) {
+          throw new AramexApiError(failureMessage, {
+            operation: 'CreateShipments',
+            code: 'carrier_rejected',
+            body: result
+          });
+        }
 
+        // 2. Not a clear "yes" either: a missing flag, a missing shipment or a missing AWB.
+        // Aramex may have created the shipment, so this must be reconciled, not retried.
         if (
           result.HasErrors !== false ||
           !processedShipment ||
           processedShipment.HasErrors !== false ||
           !processedShipment.ID
         ) {
-          throw new AramexApiError(
-            'Aramex CreateShipments returned an incomplete or unsuccessful shipment response',
-            {
-              operation: 'CreateShipments',
-              body: result
-            }
-          );
+          throw new AramexApiError(failureMessage, {
+            operation: 'CreateShipments',
+            code: 'incomplete_response',
+            outcomeUnknown: true,
+            body: result
+          });
         }
 
+        // Success. LabelURL is a link to the label PDF, NOT a tracking page, so
+        // trackingUrl stays null. The label uses the same shape as the RedBox adapter.
         return {
           ...result,
-          trackingNumber: processedShipment.ID
+          shipmentId: processedShipment.ID,
+          trackingNumber: processedShipment.ID,
+          trackingUrl: null,
+          label: processedShipment.LabelURL
+            ? { url: processedShipment.LabelURL, fileName: `aramex-${processedShipment.ID}.pdf` }
+            : null,
+          notifications
         };
       } catch (error) {
         if (error instanceof AramexSoapError) {
           throw new AramexApiError(error.message, {
             operation: error.operation,
             status: error.status,
-            body: error.body
+            body: error.body,
+            code: error.code,
+            outcomeUnknown: error.outcomeUnknown
           });
         }
 
@@ -357,6 +306,7 @@ module.exports = {
   name,
   normalizeEvent,
   toParty,
+  AramexContractError,
   AramexApiError,
   STATUS_EVENT_MAP,
   parseShipmentCreationResponse

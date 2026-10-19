@@ -134,9 +134,30 @@ function createReturnOrchestrator({
         trackingUrl: booking.trackingUrl || null
       };
     } catch (error) {
-      const REVIEW_CODES = ['invalid_shipment', 'original_shipment_not_found', 'multiple_original_shipments', 'original_shipment_rejected'];
+      // The request may have reached the carrier and created a shipment even though we
+      // got no clean answer (timeout, dropped connection, unreadable reply). The job
+      // stays claimed, so a redelivered webhook cannot book again. Ops must look the
+      // booking up at the carrier by the return ID before anyone re-books.
+      if (error.outcomeUnknown) {
+        await jobStore.update(key, {
+          status: 'manual_review',
+          reason: 'booking_outcome_unknown',
+          outcomeUnknown: true,
+          error: error.message
+        });
+        return enqueueForReview({
+          returnId, reverseFulfillmentOrderId, reason: 'booking_outcome_unknown', matchedOn: match.matchedOn
+        });
+      }
+
+      const REVIEW_CODES = ['invalid_shipment', 'carrier_rejected', 'original_shipment_not_found', 'multiple_original_shipments', 'original_shipment_rejected'];
       if (REVIEW_CODES.includes(error.code)) {
-        await jobStore.update(key, { status: 'manual_review', reason: error.code });
+        await jobStore.update(key, {
+          status: 'manual_review',
+          reason: error.code,
+          // Keep the carrier's own reasons (e.g. Aramex "ERR30 Line1 is empty") for ops.
+          ...(error.code === 'carrier_rejected' ? { error: error.message } : {})
+        });
         return enqueueForReview({
           returnId, reverseFulfillmentOrderId, reason: error.code, matchedOn: match.matchedOn,
           ...(error.missing ? { missing: error.missing } : {})

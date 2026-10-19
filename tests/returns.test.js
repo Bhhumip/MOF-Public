@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createReturnOrchestrator, resolveReturnCarrier } = require('../src/returns');
-
+const { createMemoryJobStore } = require('../src/jobs');
 const DEFAULT_RFO = 'gid://shopify/ReverseFulfillmentOrder/5';
 
 const approvedPayload = {
@@ -273,6 +273,58 @@ test('a failed booking marks the job failed and rethrows', async () => {
   });
 
   await assert.rejects(() => orchestrator.onReturnApproved(approvedPayload), /carrier down/);
+});
+test('an unknown booking outcome goes to manual review, is never retried, and cannot be re-booked', async () => {
+  let calls = 0;
+  const unsure = {
+    name: 'aramex',
+    async createReturnShipment() {
+      calls += 1;
+      throw Object.assign(new Error('timed out'), { code: 'timeout', outcomeUnknown: true });
+    }
+  };
+  const queued = [];
+  const jobStore = createMemoryJobStore();
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['aramex'] }),
+    carriers: { aramex: unsure },
+    jobStore,
+    manualReviewQueue: { async enqueue(record) { queued.push(record); } }
+  });
+
+  const first = await orchestrator.onReturnApproved(approvedPayload);
+  assert.equal(first.results[0].action, 'manual_review');
+  assert.equal(first.results[0].reason, 'booking_outcome_unknown');
+  assert.equal(queued[0].reason, 'booking_outcome_unknown');
+
+  const job = await jobStore.get(`rfo:${DEFAULT_RFO}`);
+  assert.equal(job.status, 'manual_review');
+  assert.equal(job.outcomeUnknown, true);
+
+  // The webhook arrives again: the claim stops a second booking.
+  const second = await orchestrator.onReturnApproved(approvedPayload);
+  assert.equal(second.results[0].action, 'duplicate');
+  assert.equal(calls, 1);
+});
+
+test('a carrier rejection goes to manual review with the carrier reasons kept on the job', async () => {
+  const rejecting = {
+    name: 'aramex',
+    async createReturnShipment() {
+      throw Object.assign(new Error('rejected: ERR30 Line1 is empty'), { code: 'carrier_rejected' });
+    }
+  };
+  const jobStore = createMemoryJobStore();
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['aramex'] }),
+    carriers: { aramex: rejecting },
+    jobStore
+  });
+
+  const result = await orchestrator.onReturnApproved(approvedPayload);
+  assert.equal(result.results[0].action, 'manual_review');
+  assert.equal(result.results[0].reason, 'carrier_rejected');
+  assert.match((await jobStore.get(`rfo:${DEFAULT_RFO}`)).error, /ERR30 Line1 is empty/);
 });
 
 test('a payload without a return id is rejected', async () => {

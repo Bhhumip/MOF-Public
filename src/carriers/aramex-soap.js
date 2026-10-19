@@ -11,12 +11,17 @@ const SOAP_ACTIONS = Object.freeze({
 });
 
 class AramexSoapError extends Error {
-    constructor(message, { operation, status, body } = {}) {
+    // code: 'timeout' | 'network_error' | 'soap_fault' | 'http_error'
+    // outcomeUnknown: true when the request MAY have reached Aramex and created
+    // something. Callers must reconcile before retrying; never re-send blindly.
+    constructor(message, { operation, status, body, code, outcomeUnknown = false } = {}) {
         super(message);
         this.name = 'AramexSoapError';
         this.operation = operation;
         this.status = status;
         this.body = body;
+        this.code = code;
+        this.outcomeUnknown = outcomeUnknown;
     }
 }
 
@@ -129,33 +134,59 @@ function createAramexSoapTransport({
             const xml = buildSoapEnvelope(requestWrapper, payload);
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), timeoutMs);
-
             try {
-                const response = await fetchImpl(baseUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'text/xml; charset=utf-8',
-                        Accept: 'text/xml',
-                        SOAPAction: `"${soapAction}"`
-                    },
-                    body: xml,
-                    signal: controller.signal
-                });
+                let response;
+                let body;
 
-                const body = await response.text();
+                // Anything that goes wrong between sending the request and reading the
+                // whole answer leaves us not knowing whether Aramex processed it.
+                try {
+                    response = await fetchImpl(baseUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'text/xml; charset=utf-8',
+                            Accept: 'text/xml',
+                            SOAPAction: `"${soapAction}"`
+                        },
+                        body: xml,
+                        signal: controller.signal
+                    });
+                    body = await response.text();
+                } catch (error) {
+                    const timedOut = error?.name === 'AbortError';
+                    throw new AramexSoapError(
+                        timedOut
+                            ? `Aramex ${operation} timed out after ${timeoutMs} ms`
+                            : `Aramex ${operation} request failed: ${error?.message || error}`,
+                        {
+                            operation,
+                            code: timedOut ? 'timeout' : 'network_error',
+                            outcomeUnknown: true
+                        }
+                    );
+                }
+
+                // A SOAP fault is checked first: a fault inside an HTTP 500 carries the
+                // real reason. Aramex refused the request, so nothing was created.
                 const faultMessage = getSoapFaultMessage(body);
+                if (faultMessage) {
+                    throw new AramexSoapError(
+                        `Aramex ${operation} SOAP fault: ${faultMessage}`,
+                        { operation, status: response.status, body, code: 'soap_fault' }
+                    );
+                }
 
                 if (!response.ok) {
                     throw new AramexSoapError(
                         `Aramex ${operation} failed with HTTP ${response.status}`,
-                        { operation, status: response.status, body }
-                    );
-                }
-
-                if (faultMessage) {
-                    throw new AramexSoapError(
-                        `Aramex ${operation} SOAP fault: ${faultMessage}`,
-                        { operation, status: response.status, body }
+                        {
+                            operation,
+                            status: response.status,
+                            body,
+                            code: 'http_error',
+                            // A 5xx without a fault (gateway, overload) may still have been processed.
+                            outcomeUnknown: response.status >= 500
+                        }
                     );
                 }
 
