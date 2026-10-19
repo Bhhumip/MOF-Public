@@ -5,6 +5,7 @@ const { createWebhookHandler } = require('./webhooks');
 const { createShopifyClient } = require('./shopify');
 const { createReturnOrchestrator } = require('./returns');
 const { createMongoJobStore } = require('./jobs-mongodb');
+const { createManualReviewQueue } = require('./manual-review');
 //const { createRedboxClient } = require('./carriers/redbox');
 //const { createAramexClient } = require('./carriers/aramex');
 const { createRedboxWebhookHandler, verifyBearerToken } = require('./carriers/redbox-webhook');
@@ -12,6 +13,9 @@ const { createStatusSync } = require('./status-sync');
 const { buildCarriers } = require('./carriers/factory');
 function createServer({ config = getConfig(), jobStore: injectedJobStore } = {}) {
   const shopify = createShopifyClient(config.shopify);
+  const manualReviewQueue = createManualReviewQueue({
+    shopify
+  });
 
   // const carriers = {
   //   redbox: createRedboxClient(config.carriers.redbox),
@@ -72,7 +76,8 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
     carriers,
     jobStore,
     defaultItemWeightKg: config.defaultItemWeightKg,
-    statusSync
+    statusSync,
+    manualReviewQueue
     // manualReviewQueue: ...  // wire to ops queue per §8
   });
 

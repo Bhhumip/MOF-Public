@@ -17,10 +17,41 @@ function createReturnOrchestrator({
   defaultItemWeightKg = null,
   statusSync
 } = {}) {
+
   async function enqueueForReview(record) {
-    if (manualReviewQueue) await manualReviewQueue.enqueue(record);
-    return { carrier: FALLBACK_CARRIER, action: 'manual_review', ...record };
+    if (manualReviewQueue) {
+      try {
+        await manualReviewQueue.enqueue(record);
+      } catch (error) {
+        // The review decision is still valid even if Shopify tagging fails.
+        // Keep the tagging error visible for operational follow-up.
+        if (record.jobKey) {
+          try {
+            await jobStore.update(record.jobKey, {
+              manualReviewTagError: error.message
+            });
+          } catch (storeError) {
+            console.error(
+              '[manual-review] Could not persist tag error:',
+              storeError.message
+            );
+          }
+        }
+
+        console.error(
+          '[manual-review] Failed to apply Shopify order tags:',
+          error.message
+        );
+      }
+    }
+
+    return {
+      carrier: FALLBACK_CARRIER,
+      action: 'manual_review',
+      ...record
+    };
   }
+
 
   async function processReverseFulfillmentOrder({ returnId, reverseFulfillmentOrderId, order }) {
     // Idempotency: claim BEFORE booking so a redelivered webhook cannot double-book (§8).
@@ -47,6 +78,7 @@ function createReturnOrchestrator({
       await jobStore.update(key, { status: 'manual_review' });
       return enqueueForReview({
         returnId,
+        orderId: order.id,
         reverseFulfillmentOrderId,
         reason: match.reason,
         matchedOn: match.matchedOn,
@@ -74,7 +106,7 @@ function createReturnOrchestrator({
     } catch (error) {
       if (error instanceof ReturnShipmentError) {
         await jobStore.update(key, { status: 'manual_review', reason: error.code });
-        return enqueueForReview({ returnId, reverseFulfillmentOrderId, reason: error.code, matchedOn: match.matchedOn });
+        return enqueueForReview({ returnId, orderId: order.id, reverseFulfillmentOrderId, reason: error.code, matchedOn: match.matchedOn });
       }
       await jobStore.update(key, { status: 'failed', error: error.message });
       throw error;
@@ -146,7 +178,7 @@ function createReturnOrchestrator({
           error: error.message
         });
         return enqueueForReview({
-          returnId, reverseFulfillmentOrderId, reason: 'booking_outcome_unknown', matchedOn: match.matchedOn
+          returnId, orderId: order.id, reverseFulfillmentOrderId, reason: 'booking_outcome_unknown', matchedOn: match.matchedOn
         });
       }
 
@@ -159,7 +191,7 @@ function createReturnOrchestrator({
           ...(error.code === 'carrier_rejected' ? { error: error.message } : {})
         });
         return enqueueForReview({
-          returnId, reverseFulfillmentOrderId, reason: error.code, matchedOn: match.matchedOn,
+          returnId, orderId: order.id, reverseFulfillmentOrderId, reason: error.code, matchedOn: match.matchedOn,
           ...(error.missing ? { missing: error.missing } : {})
         });
       }
@@ -184,13 +216,13 @@ function createReturnOrchestrator({
       if (!context) {
         return {
           returnId,
-          results: [await enqueueForReview({ returnId, reason: 'order_not_accessible', matchedOn: [] })]
+          results: [await enqueueForReview({ returnId, orderId: payload.order_id || payload.order?.admin_graphql_api_id || null, reason: 'order_not_accessible', matchedOn: [] })]
         };
       }
       if (context.reverseFulfillmentOrders.length === 0) {
         return {
           returnId,
-          results: [await enqueueForReview({ returnId, reason: 'no_reverse_fulfillment_order', matchedOn: [] })]
+          results: [await enqueueForReview({ returnId, orderId: payload.order_id || payload.order?.admin_graphql_api_id || null, reason: 'no_reverse_fulfillment_order', matchedOn: [] })]
         };
       }
 
