@@ -163,7 +163,7 @@ function parseCreateShipmentResponse(response) {
         throw new RedboxContractError(
             'unrecognized_response',
             'RedBox response is missing shipment_id and/or tracking_number',
-            { body: response }
+            { body: response, outcomeUnknown: true }
         );
     }
     return {

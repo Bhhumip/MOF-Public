@@ -30,6 +30,7 @@ function topicToHandler(topic) {
     'returns/request': 'onReturnRequested',
     'returns/approve': 'onReturnApproved',
     'returns/process': 'onReturnProcessed',
+    'returns/cancel': 'onReturnCancelled',
     'reverse_fulfillment_orders/dispose': 'onReverseFulfillmentOrderDisposed'
   };
   return map[topic] || null;

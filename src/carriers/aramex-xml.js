@@ -37,8 +37,8 @@ function isNil(attributeText) {
 // Tokens: CDATA | comment | processing instruction | tag | text.
 const TOKEN = /<!\[CDATA\[([\s\S]*?)\]\]>|<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<(\/)?([A-Za-z_][\w.:-]*)([^>]*?)(\/)?>|([^<]+)/g;
 
-function createNode(name, nil = false) {
-    return { name, nil, text: '', children: [] };
+function createNode(name, nil = false, attributes = '') {
+    return { name, nil, attributes, text: '', children: [] };
 }
 
 /** Parse an XML string into a tree. Returns a synthetic root whose children are the top elements. */
@@ -61,13 +61,19 @@ function parseXml(xml) {
                 const openIndex = stack.map((node) => node.name).lastIndexOf(name);
                 if (openIndex > 0) stack.length = openIndex;
             } else {
-                const node = createNode(name, isNil(attributes));
+                const node = createNode(name, isNil(attributes), attributes);
                 current.children.push(node);
                 if (!selfClosing) stack.push(node);
             }
         }
     }
     return root;
+}
+
+/** Value of an attribute (any prefix), or null. Used to read schema files. */
+function attribute(node, name) {
+    const match = new RegExp(`(?:^|\\s)(?:[\\w.-]+:)?${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(node?.attributes ?? '');
+    return match ? (match[1] ?? match[2]) : null;
 }
 
 /** First DIRECT child with this local name, or null. */
@@ -102,4 +108,4 @@ function childText(node, name) {
     return valueOf(child(node, name));
 }
 
-module.exports = { parseXml, child, children, descendant, valueOf, childText, decodeEntities };
+module.exports = { parseXml, child, children, descendant, valueOf, childText, attribute, decodeEntities };

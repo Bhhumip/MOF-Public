@@ -17,8 +17,13 @@ function createMongoJobStore({
         throw new Error('A MongoDB database name is required');
     }
 
-    const client = new MongoClient(uri, clientOptions);
-
+    const client = new MongoClient(uri, { family: 4, serverSelectionTimeoutMS: 10000 }, clientOptions);
+    client.on('serverDescriptionChanged', (event) => {
+        console.log('[MongoDB] Server description changed:', {
+            address: event.address,
+            type: event.newDescription.type
+        });
+    });
     let collectionPromise = null;
     let closed = false;
     let closePromise = null;
@@ -30,7 +35,19 @@ function createMongoJobStore({
 
         if (!collectionPromise) {
             collectionPromise = (async () => {
-                await client.connect();
+                try {
+                    await client.connect();
+                    console.log('[MongoDB] Connected successfully');
+                } catch (error) {
+                    console.error('[MongoDB] Connection failed:', {
+                        name: error.name,
+                        message: error.message,
+                        code: error.code,
+                        syscall: error.syscall,
+                        hostname: error.hostname
+                    });
+                    throw error;
+                }
 
                 const collection = client
                     .db(databaseName)

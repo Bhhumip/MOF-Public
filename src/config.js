@@ -63,6 +63,28 @@ function parseParcelDimensions(value) {
   return { length, width, height };
 }
 
+// JSON object such as {"SH005":"returned"} that pins Aramex update codes to events.
+const KNOWN_EVENTS = ['created', 'picked_up', 'in_transit', 'out_for_delivery', 'returned', 'exception', 'expired', 'cancelled'];
+function parseStatusMap(value) {
+  if (!value) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error('ARAMEX_STATUS_MAP must be valid JSON, e.g. {"SH005":"returned"}');
+  }
+  const map = {};
+  for (const [code, event] of Object.entries(parsed)) {
+    if (!KNOWN_EVENTS.includes(event)) {
+      throw new Error(`ARAMEX_STATUS_MAP: "${event}" is not one of ${KNOWN_EVENTS.join(', ')}`);
+    }
+    map[String(code).trim().toUpperCase()] = event;
+  }
+  return map;
+}
+
+const number = (value, fallback) => (value === undefined || value === '' ? fallback : Number(value));
+
 function getConfig(env = process.env) {
   const port = Number(env.PORT || 3000);
   const carrierMode = resolveCarrierMode(env);
@@ -86,12 +108,32 @@ function getConfig(env = process.env) {
   }
   assertNotProductionEndpoint('RedBox', env.REDBOX_API_ENDPOINT);
   assertNotProductionEndpoint('Aramex', env.ARAMEX_SOAP_ENDPOINT);
+  assertNotProductionEndpoint('Aramex tracking', env.ARAMEX_TRACKING_ENDPOINT);
+
+  // Guard: the middleware refuses to start against any store but the one named here.
+  const allowedStore = (env.ALLOWED_SHOPIFY_STORE || '').trim().toLowerCase();
+  if (allowedStore && String(env.SHOPIFY_STORE_DOMAIN).trim().toLowerCase() !== allowedStore) {
+    throw new Error(
+      `SHOPIFY_STORE_DOMAIN (${env.SHOPIFY_STORE_DOMAIN}) is not the allowed store (${allowedStore}). Refusing to start.`
+    );
+  }
   return {
     port,
     carrierMode,
     defaultItemWeightKg,
     jobStore,
     jobDbPath: jobStore.sqlitePath,
+    testOrderTag: (env.TEST_ORDER_TAG || '').trim() || null,
+    pollerEnabled: env.POLLER_ENABLED !== 'false',
+    // 127.0.0.1 when nginx sits in front (see deploy/); 0.0.0.0 reaches the app from outside.
+    host: (env.HOST || '0.0.0.0').trim(),
+    // A job "processing" for longer than this means the server stopped while handling it.
+    stuckJobMinutes: number(env.STUCK_JOB_MINUTES, 15),
+    // Finds approved returns whose webhook never arrived (server down, lost delivery).
+    reconcile: {
+      enabled: env.RECONCILE_ENABLED !== 'false',
+      lookbackHours: number(env.RECONCILE_LOOKBACK_HOURS, 24)
+    },
 
     shopify: {
       storeDomain: env.SHOPIFY_STORE_DOMAIN,
@@ -107,6 +149,7 @@ function getConfig(env = process.env) {
         'returns/request',
         'returns/approve',
         'returns/process',
+        'returns/cancel',
         'reverse_fulfillment_orders/dispose'
       ]
     },
@@ -123,7 +166,8 @@ function getConfig(env = process.env) {
       aramex: {
         // SOAP endpoint only.
         endpoint: env.ARAMEX_SOAP_ENDPOINT || null,
-
+        // Tracking is a separate Aramex service (…/tracking/service_1_0.svc).
+        trackingEndpoint: env.ARAMEX_TRACKING_ENDPOINT || null,
         username: env.ARAMEX_USERNAME || null,
         password: env.ARAMEX_PASSWORD || null,
         version: env.ARAMEX_VERSION || 'v1',
@@ -147,6 +191,23 @@ function getConfig(env = process.env) {
         warehousePhone: env.ARAMEX_WAREHOUSE_PHONE || null,
         warehouseEmail: env.ARAMEX_WAREHOUSE_EMAIL || null,
 
+        // false = do not send ForeignHAWB (our return id). Default true: it makes a repeat booking fail with ERR30.
+        useForeignHawb: env.ARAMEX_USE_FOREIGN_HAWB !== 'false',
+        // Offset of the Aramex station clock from UTC, in minutes (Saudi Arabia = 180).
+        utcOffsetMinutes: number(env.ARAMEX_UTC_OFFSET_MINUTES, 180),
+        // Pickup slot rules. Real values come from the Aramex entity's business hours.
+        pickupWindow: {
+          utcOffsetMinutes: number(env.ARAMEX_UTC_OFFSET_MINUTES, 180),
+          openHour: number(env.ARAMEX_PICKUP_OPEN_HOUR, 9),
+          lastPickupHour: number(env.ARAMEX_PICKUP_LAST_HOUR, 17),
+          closeHour: number(env.ARAMEX_PICKUP_CLOSE_HOUR, 18),
+          leadMinutes: number(env.ARAMEX_PICKUP_LEAD_MINUTES, 120),
+          closedDays: (env.ARAMEX_PICKUP_CLOSED_DAYS ?? '5')
+            .split(',').map((day) => day.trim()).filter(Boolean).map(Number)
+        },
+        // Pins Aramex update codes to internal events; unknown codes fall back to the description text.
+        statusMap: parseStatusMap(env.ARAMEX_STATUS_MAP),
+        statusHeuristics: env.ARAMEX_STATUS_HEURISTICS !== 'false',
         trackingMode: env.ARAMEX_TRACKING_MODE || 'poll',
         pollIntervalMs: Number(
           env.ARAMEX_POLL_INTERVAL_MS || 15 * 60 * 1000

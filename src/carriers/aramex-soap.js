@@ -2,12 +2,18 @@
 
 const SOAP_NAMESPACE = 'http://schemas.xmlsoap.org/soap/envelope/';
 const ARAMEX_NAMESPACE = 'http://ws.aramex.net/ShippingAPI/v1/';
-
+// .NET string arrays (the tracking request's list of waybills) live in this namespace.
+const ARRAYS_NAMESPACE = 'http://schemas.microsoft.com/2003/10/Serialization/Arrays';
 const SOAP_ACTIONS = Object.freeze({
     CreateShipments:
         `${ARAMEX_NAMESPACE}Service_1_0/CreateShipments`,
     PrintLabel:
-        `${ARAMEX_NAMESPACE}Service_1_0/PrintLabel`
+        `${ARAMEX_NAMESPACE}Service_1_0/PrintLabel`,
+    CreatePickup:
+        `${ARAMEX_NAMESPACE}Service_1_0/CreatePickup`,
+    // Tracking is a separate Aramex service (its own endpoint), same SOAP namespace.
+    TrackShipments:
+        `${ARAMEX_NAMESPACE}Service_1_0/TrackShipments`
 });
 
 class AramexSoapError extends Error {
@@ -57,6 +63,13 @@ function serializeXmlElement(name, value) {
 
     if (typeof value !== 'object') {
         throw new TypeError(`Unsupported XML value for element "${name}"`);
+    }
+
+    // { '@xmlns': <namespace>, '#text': <value> } writes a text element that sets its own
+    // default namespace. Needed for the <string> items of a .NET string array.
+    if ('#text' in value) {
+        const namespace = value['@xmlns'] ? ` xmlns="${escapeXml(value['@xmlns'])}"` : '';
+        return `<${name}${namespace}>${escapeXml(value['#text'])}</${name}>`;
     }
 
     const children = Object.entries(value)
@@ -201,6 +214,7 @@ function createAramexSoapTransport({
 module.exports = {
     SOAP_NAMESPACE,
     ARAMEX_NAMESPACE,
+    ARRAYS_NAMESPACE,
     SOAP_ACTIONS,
     AramexSoapError,
     escapeXml,

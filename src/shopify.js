@@ -137,6 +137,27 @@ const ADD_TAGS = `
   }
 `;
 
+
+// Approved returns of recently updated orders. Used only to find returns whose webhook was missed.
+const LIST_OPEN_RETURNS = `
+  query ListOpenReturns($query: String!, $first: Int!) {
+    orders(first: $first, query: $query, sortKey: UPDATED_AT, reverse: true) {
+      nodes {
+        id
+        name
+        tags
+        returns(first: 10) {
+          nodes {
+            id
+            status
+            reverseFulfillmentOrders(first: 10) { nodes { id status } }
+          }
+        }
+      }
+    }
+  }
+`;
+
 function toOrderGid(orderId) {
   const value = String(orderId ?? '').trim();
   if (!value) throw new Error('An order ID is required');
@@ -195,6 +216,29 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
       reverseFulfillmentOrders: data.return.reverseFulfillmentOrders.nodes
     };
 
+  }
+
+  // Approved (OPEN) returns with OPEN reverse fulfillment orders, for orders updated since `since`.
+  // ASSUMPTION: verify the "return_status:in_progress" search filter on the dev store
+  // (scripts/list-open-returns.js). An unknown filter returns nothing, it does not error.
+  async function listOpenReturns({ since, limit = 50 } = {}) {
+    const sinceIso = new Date(since ?? Date.now() - 24 * 3600 * 1000).toISOString();
+    const data = await query(LIST_OPEN_RETURNS, {
+      query: `return_status:in_progress updated_at:>=${sinceIso}`,
+      first: limit
+    });
+    const found = [];
+    for (const order of data.orders.nodes) {
+      for (const ret of order.returns.nodes) {
+        if (ret.status !== 'OPEN') continue;
+        found.push({
+          returnId: ret.id,
+          order: { id: order.id, name: order.name, tags: order.tags },
+          reverseFulfillmentOrders: ret.reverseFulfillmentOrders.nodes.filter((rfo) => rfo.status === 'OPEN')
+        });
+      }
+    }
+    return found;
   }
   // Writes the carrier booking back to Shopify. An empty line-item list makes
   // Shopify create a line item for every item on the RFO (full quantity).
@@ -297,7 +341,7 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
     const errors = data.tagsAdd.userErrors;
     if (errors?.length) throw new Error(`tagsAdd failed: ${errors.map((e) => e.message).join('; ')}`);
   }
-  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails, createReverseDeliveryWithShipping, upsertReturnShipmentRecord, linkReturnShipmentToOrder, restockReverseFulfillmentOrder, addOrderTags };
+  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails, createReverseDeliveryWithShipping, upsertReturnShipmentRecord, linkReturnShipmentToOrder, restockReverseFulfillmentOrder, addOrderTags, listOpenReturns };
 
 
   async function getReturnShipmentDetails(returnId) {

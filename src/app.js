@@ -1,6 +1,8 @@
+const dns = require('node:dns');
+dns.setServers(['8.8.8.8', '1.1.1.1']);
 const http = require('node:http');
 const { getConfig } = require('./config');
-const { createSqliteJobStore } = require('./jobs-sqlite');
+//const { createSqliteJobStore } = require('./jobs-sqlite');
 const { createWebhookHandler } = require('./webhooks');
 const { createShopifyClient } = require('./shopify');
 const { createReturnOrchestrator } = require('./returns');
@@ -11,6 +13,9 @@ const { createManualReviewQueue } = require('./manual-review');
 const { createRedboxWebhookHandler, verifyBearerToken } = require('./carriers/redbox-webhook');
 const { createStatusSync } = require('./status-sync');
 const { buildCarriers } = require('./carriers/factory');
+const { createTrackingSync } = require('./tracking-sync');
+const { createPoller } = require('./poller');
+const { createLogger } = require('./logger');
 function createServer({ config = getConfig(), jobStore: injectedJobStore } = {}) {
   const shopify = createShopifyClient(config.shopify);
   const manualReviewQueue = createManualReviewQueue({
@@ -27,7 +32,7 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
         uri: config.jobStore.mongodbUri,
         databaseName: config.jobStore.mongodbDatabase
       })
-      : createSqliteJobStore(config.jobStore.sqlitePath)
+      : require('./jobs-sqlite').createSqliteJobStore(config.jobStore.sqlitePath)
   );
 
   const statusSync = createStatusSync({ shopify, enabled: config.shopify.statusSync });
@@ -77,9 +82,34 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
     jobStore,
     defaultItemWeightKg: config.defaultItemWeightKg,
     statusSync,
-    manualReviewQueue
-    // manualReviewQueue: ...  // wire to ops queue per §8
+    manualReviewQueue,
+    testOrderTag: config.carrierMode === 'dry-run' ? null : config.testOrderTag,
+    stuckJobMinutes: config.stuckJobMinutes
   });
+
+  // Background work, started by start() only (tests that call createServer do not poll).
+  // Every cycle: ask Aramex for new statuses, then retry anything that failed after booking.
+  // Run it on ONE instance only (POLLER_ENABLED=false on the others).
+  const aramex = carriers.aramex;
+  const logger = createLogger();
+  const canTrack = config.carrierMode !== 'dry-run' && typeof aramex?.trackShipments === 'function' &&
+    config.carriers.aramex.trackingMode === 'poll' && Boolean(config.carriers.aramex.trackingEndpoint);
+  const trackingSync = canTrack ? createTrackingSync({ jobStore, carrier: aramex, statusSync, logger }) : null;
+  const poller = config.pollerEnabled && config.carrierMode !== 'dry-run'
+    ? createPoller({
+      intervalMs: config.carriers.aramex.pollIntervalMs,
+      logger,
+      task: async () => {
+        if (trackingSync) logger.info('aramex tracking cycle', await trackingSync.runOnce());
+        const retried = await returns.retryPending();
+        if (Object.values(retried).some(Boolean)) logger.info('retry cycle', retried);
+        if (config.reconcile.enabled) {
+          const reconciled = await returns.reconcileMissing({ lookbackHours: config.reconcile.lookbackHours });
+          if (reconciled.found || reconciled.errors) logger.info('reconcile cycle', reconciled);
+        }
+      }
+    })
+    : null;
 
   const handleWebhook = createWebhookHandler({
     webhookSecret: config.shopify.webhookSecret,
@@ -89,8 +119,21 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
   const server = http.createServer(async (request, response) => {
     try {
       if (request.url === '/health') {
-        response.writeHead(200, { 'Content-Type': 'application/json' });
-        response.end(JSON.stringify({ status: 'ok' }));
+        // Also proves the job store is reachable (e.g. MongoDB Atlas), so a monitor sees a dead database.
+        let store = 'ok';
+        try {
+          await jobStore.get('health-check');
+        } catch (error) {
+          console.error('[health] MongoDB job store check failed:', error);
+          store = 'error';
+        }
+        response.writeHead(store === 'ok' ? 200 : 503, { 'Content-Type': 'application/json' });
+        response.end(JSON.stringify({
+          status: store === 'ok' ? 'ok' : 'degraded',
+          jobStore: store,
+          mode: config.carrierMode,
+          poller: Boolean(poller?.active)
+        }));
         return;
       }
 
@@ -128,9 +171,12 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
     }
 
   });
-
+  server.poller = poller;
+  server.jobStore = jobStore;
+  server.poller = poller;
 
   server.on('close', () => {
+    poller?.stop();
     Promise.resolve()
       .then(() => jobStore.close())
       .catch(error => {
@@ -151,10 +197,30 @@ function start() {
   console.log(`Aramex base URL: ${config.carriers.aramex.endpoint || '(not set)'}`);
   const server = createServer({ config });
   console.log(`Status sync: ${config.shopify.statusSync ? 'ON' : 'OFF'}`);
-  server.listen(config.port, () => {
-    console.log(`Returns middleware listening on port ${config.port}`);
+  console.log(`Test-order guard: ${config.testOrderTag && config.carrierMode !== 'dry-run' ? config.testOrderTag : 'off'}`);
+
+  server.listen(config.port, config.host, () => {
+    console.log(`Returns middleware listening on ${config.host}:${config.port}`);
+    if (server.poller) {
+      server.poller.start();
+      console.log(`Poller: ON every ${config.carriers.aramex.pollIntervalMs} ms (Aramex tracking ${config.carriers.aramex.trackingEndpoint ? 'enabled' : 'disabled: ARAMEX_TRACKING_ENDPOINT not set'})`);
+    } else {
+      console.log('Poller: OFF');
+    }
   });
+  // systemd/pm2 stop the app with SIGTERM: stop polling, let open requests finish, then exit.
+  // Work cut off by a stop is picked up again by the stuck-job sweep after the restart.
+  const shutdown = (signal) => {
+    console.log(`${signal} received, shutting down`);
+    server.poller?.stop();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 10000).unref();
+  };
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
+
   return server;
+
 }
 if (require.main === module) {
   start();

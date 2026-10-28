@@ -47,6 +47,12 @@ function truncate(text, max) {
     return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+// "gid://shopify/ReverseFulfillmentOrder/27807449386" -> "MOF-27807449386" (Aramex limit: 50 chars).
+function makeForeignHawb(reverseFulfillmentOrderId) {
+    const digits = String(reverseFulfillmentOrderId ?? '').match(/(\d+)\s*$/)?.[1];
+    return digits ? `MOF-${digits}`.slice(0, 50) : '';
+}
+
 /**
  * Neutral party ({name, company, phone, email, address:{...}}) -> Aramex Party.
  * Element order follows the WSDL: Reference1, Reference2, AccountNumber,
@@ -120,7 +126,7 @@ function describeGoods(items, fallback, maxLength) {
  * options: productGroup, productType, paymentType, paymentOptions,
  *          dimensionsCm {length,width,height}, packageType,
  *          fallbackPhone, fallbackEmail (used when Shopify has no value for
- *          the warehouse contact), now (a Date, for tests).
+ *          useForeignHawb (default true), now (a Date, for tests)
  */
 function buildShipment(returnShipment = {}, options = {}) {
     const settings = { ...DEFAULT_OPTIONS, ...options };
@@ -146,6 +152,10 @@ function buildShipment(returnShipment = {}, options = {}) {
             { missing }
         );
     }
+    // ForeignHAWB must be unique per shipment (Aramex error ERR30 otherwise).
+    // ASSUMPTION: confirm ERR30 on a repeated booking in the sandbox. Set
+    // ARAMEX_USE_FOREIGN_HAWB=false if Aramex rejects the field.
+    const foreignHawb = options.useForeignHawb === false ? '' : makeForeignHawb(returnShipment.reverseFulfillmentOrderId);
 
     const shippingDateTime = (options.now || new Date()).toISOString();
     const weight = { Unit: 'KG', Value: weightKg };
@@ -191,7 +201,9 @@ function buildShipment(returnShipment = {}, options = {}) {
                     }
                 ]
             }
-        }
+        },
+        //Position matters:Details,attachments,ForeignHAWB (WSDL sequence)
+        ...(foreignHawb && { ForeignHAWB: foreignHawb })
     };
 }
 
@@ -200,5 +212,6 @@ module.exports = {
     DEFAULT_DIMENSIONS_CM,
     DEFAULT_OPTIONS,
     toParty,
+    makeForeignHawb,
     buildShipment
 };

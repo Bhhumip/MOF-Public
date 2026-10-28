@@ -325,7 +325,7 @@ function createRedboxClient(config = {}) {
       if (!created) {
         throw new RedboxApiError(
           `RedBox says reference ${body.reference} already exists but the shipment could not be found`,
-          { status: 409, code: 'already_exists_unresolved', body: error.body }
+          { status: 409, code: 'already_exists_unresolved', body: error.body, outcomeUnknown: true }
         );
       }
       recovered = true;

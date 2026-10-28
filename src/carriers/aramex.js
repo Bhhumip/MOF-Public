@@ -1,26 +1,49 @@
 'use strict';
 
 const name = 'aramex';
-const { createAramexSoapTransport, AramexSoapError } = require('./aramex-soap');
+const { createAramexSoapTransport, AramexSoapError, ARRAYS_NAMESPACE } = require('./aramex-soap');
 const { buildShipment, toParty, AramexContractError } = require('./aramex-contract');
 const { parseXml, child, children, descendant, childText } = require('./aramex-xml');
-const STATUS_EVENT_MAP = Object.freeze({
-  sh001: 'created',
-  sh002: 'picked_up',
-  sh003: 'in_transit',
-  sh004: 'out_for_delivery',
-  sh005: 'delivered',
-  sh006: 'exception',
-  sh007: 'cancelled',
-  sh008: 'returned'
-});
+const { computePickupWindow, buildPickup } = require('./aramex-pickup');
+
+/**
+ * Aramex tracking: UpdateCode -> internal event.
+ *
+ * NOT FILLED IN ON PURPOSE. The tracking WSDL does not list the update codes
+ * and the earlier sh001..sh008 table was a placeholder. Until Aramex confirms
+ * its code list (or the first sandbox/production responses show it), codes are
+ * classified from the UpdateDescription text (see DESCRIPTION_RULES) and every
+ * classification is logged with the raw code so the codes can be pinned here
+ * or through ARAMEX_STATUS_MAP (JSON, e.g. {"SH005":"returned"}).
+ */
+const STATUS_EVENT_MAP = Object.freeze({});
+
+/**
+ * Description -> event, first match wins. HEURISTIC, to be replaced by real
+ * codes. A return travels customer -> warehouse, so "delivered" means the
+ * parcel reached the warehouse: that is the internal `returned` event, which
+ * the Shopify sync already tags as Return-Received. A parcel going BACK to the
+ * customer (return to shipper) is an `exception` that needs a person.
+ */
+const DESCRIPTION_RULES = Object.freeze([
+  [/\bcancel/i, 'cancelled'],
+  [/return(ed)? to (the )?(shipper|sender|origin)|\brts\b/i, 'exception'],
+  [/undeliver|not deliver|unable to deliver|attempt|refus|no one|not available|incorrect address|wrong address|address (not found|issue)|on hold|\bheld\b|damag|\blost\b|problem/i, 'exception'],
+  [/out for delivery|with (the )?courier|delivery in progress/i, 'out_for_delivery'],
+  [/\bdelivered\b/i, 'returned'],
+  [/picked up|\bcollected\b|pick-?up completed|received from (the )?shipper/i, 'picked_up'],
+  [/in transit|departed|arrived|transferred|processing|sorted|forwarded|\bat (the )?(origin|destination|hub|facility|station)/i, 'in_transit'],
+  [/created|data received|booked|information received|awaiting|ready for pick/i, 'created']
+]);
 
 class AramexApiError extends Error {
   // code: 'carrier_rejected' (Aramex said HasErrors=true), 'incomplete_response',
-  //       or a transport code ('timeout', 'network_error', 'soap_fault', 'http_error').
-  // outcomeUnknown: true when the request may have created a shipment even though we
+  //       'not_configured', or a transport code ('timeout', 'network_error',
+  //       'soap_fault', 'http_error').
+  // outcomeUnknown: true when the request may have created something even though we
   //       got no clean answer. The orchestrator sends these to manual review.
-  constructor(message, { operation, body, status, code, outcomeUnknown = false } = {}) {
+  // notifications: Aramex's own [{code, message}] list (e.g. ERR50), when it sent one.
+  constructor(message, { operation, body, status, code, outcomeUnknown = false, notifications = [] } = {}) {
     super(message);
     this.name = 'AramexApiError';
     this.operation = operation;
@@ -28,31 +51,52 @@ class AramexApiError extends Error {
     this.status = status;
     this.code = code;
     this.outcomeUnknown = outcomeUnknown;
+    this.notifications = notifications;
+  }
+
+  hasNotification(code) {
+    return this.notifications.some((entry) => entry.code === code);
   }
 }
 
-function normalizeEvent(raw = {}) {
-  const code = String(raw.UpdateCode || raw.updateCode || '')
-    .trim()
-    .toLowerCase();
+// Aramex dates carry no time zone ("2026-10-21T10:15:00"); they are station local time.
+function toIsoWithOffset(value, utcOffsetMinutes = 180) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  if (/(Z|[+-]\d{2}:\d{2})$/.test(text)) return text;
+  const sign = utcOffsetMinutes < 0 ? '-' : '+';
+  const absolute = Math.abs(utcOffsetMinutes);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${text.replace(/\.\d+$/, '')}${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`;
+}
 
-  const status = String(
-    raw.Status || raw.status || raw.Event || raw.event || ''
-  ).trim().toLowerCase();
+/**
+ * One Aramex TrackingResult -> the internal event shape shared with RedBox.
+ * options: statusMap ({ CODE: event }), heuristics (default true), utcOffsetMinutes.
+ */
+function normalizeEvent(raw = {}, { statusMap = {}, heuristics = true, utcOffsetMinutes = 180 } = {}) {
+  const code = String(raw.UpdateCode ?? raw.updateCode ?? '').trim().toUpperCase();
+  const description = String(raw.UpdateDescription ?? raw.updateDescription ?? '').trim();
+
+  let event = statusMap[code] || STATUS_EVENT_MAP[code] || null;
+  let classifiedBy = event ? 'code' : null;
+  if (!event && heuristics && description) {
+    const rule = DESCRIPTION_RULES.find(([pattern]) => pattern.test(description));
+    if (rule) {
+      event = rule[1];
+      classifiedBy = 'description';
+    }
+  }
 
   return {
     carrier: name,
-    event: STATUS_EVENT_MAP[code] || STATUS_EVENT_MAP[status] || 'unknown',
-    rawStatus: code || status || null,
-    occurredAt:
-      raw.UpdateDateTime ||
-      raw.updateDateTime ||
-      raw.EventDate ||
-      raw.eventDate ||
-      null,
-    trackingNumber:
-      raw.TrackingNumber || raw.trackingNumber || raw.AWBNumber || null,
-    raw
+    event: event || 'unknown',
+    classifiedBy,
+    rawStatus: code || description || null,
+    occurredAt: toIsoWithOffset(raw.UpdateDateTime ?? raw.updateDateTime, utcOffsetMinutes),
+    trackingNumber: raw.WaybillNumber ?? raw.trackingNumber ?? null,
+    // status_name is what the Shopify sync shows as the carrier's own wording.
+    raw: { ...raw, status_name: description || code || null }
   };
 }
 
@@ -124,10 +168,75 @@ function describeNotifications(notifications) {
     .filter(Boolean)
     .join('; ');
 }
+/**
+ * Parse a CreatePickup response (WSDL: PickupCreationResponse).
+ *   HasErrors, Notifications, ProcessedPickup > ID, GUID, Reference1
+ * ID is the collection reference number; GUID is what CancelPickup needs.
+ */
+function parsePickupCreationResponse(xml) {
+  const response = descendant(parseXml(xml), 'PickupCreationResponse');
+  const pickup = child(response, 'ProcessedPickup');
+  return {
+    HasErrors: parseBoolean(childText(response, 'HasErrors')),
+    Notifications: parseNotifications(child(response, 'Notifications')),
+    ProcessedPickup: pickup
+      ? { ID: childText(pickup, 'ID') || null, GUID: childText(pickup, 'GUID') || null }
+      : null,
+    rawXml: xml
+  };
+}
+
+/**
+ * Parse a TrackShipments response (tracking WSDL: ShipmentTrackingResponse).
+ *   HasErrors, Notifications,
+ *   TrackingResults > KeyValueOfstringArrayOfTrackingResult* > Key (the waybill),
+ *                                                              Value > TrackingResult*
+ * Returns { HasErrors, Notifications, results: { <waybill>: [TrackingResult...] } }.
+ * A waybill Aramex does not know comes back with an empty list (or not at all):
+ * that is "nothing yet", not an error.
+ */
+function parseTrackingResponse(xml) {
+  const response = descendant(parseXml(xml), 'ShipmentTrackingResponse');
+  const results = {};
+  for (const entry of child(response, 'TrackingResults')?.children ?? []) {
+    if (!entry.name.startsWith('KeyValueOf')) continue;
+    const waybill = childText(entry, 'Key');
+    if (!waybill) continue;
+    results[waybill] = children(child(entry, 'Value'), 'TrackingResult').map((node) => ({
+      WaybillNumber: childText(node, 'WaybillNumber') || waybill,
+      UpdateCode: childText(node, 'UpdateCode') || null,
+      UpdateDescription: childText(node, 'UpdateDescription') || null,
+      UpdateDateTime: childText(node, 'UpdateDateTime') || null,
+      UpdateLocation: childText(node, 'UpdateLocation') || null,
+      Comments: childText(node, 'Comments') || null,
+      ProblemCode: childText(node, 'ProblemCode') || null
+    }));
+  }
+  return {
+    HasErrors: parseBoolean(childText(response, 'HasErrors')),
+    Notifications: parseNotifications(child(response, 'Notifications')),
+    results,
+    rawXml: xml
+  };
+}
+
+// The Transaction element has five REQUIRED references in every Aramex WSDL
+// (a missing one is a deserialization fault), so all five are always sent.
+function transaction(reference = '') {
+  return {
+    Reference1: String(reference).slice(0, 50),
+    Reference2: '',
+    Reference3: '',
+    Reference4: '',
+    Reference5: ''
+  };
+}
+
 
 function createAramexClient(config = {}) {
   const {
     endpoint,
+    trackingEndpoint,
     username,
     password,
     version = 'v1',
@@ -143,6 +252,14 @@ function createAramexClient(config = {}) {
     dimensionsCm,
     warehousePhone,
     warehouseEmail,
+    useForeignHawb = true,
+    pickupWindow = {},
+    pickupLocation,
+    pickupVehicle,
+    statusMap = {},
+    statusHeuristics = true,
+    utcOffsetMinutes = 180,
+    now = () => new Date(),
     fetchImpl = globalThis.fetch,
     timeoutMs = 20000
   } = config;
@@ -157,13 +274,15 @@ function createAramexClient(config = {}) {
     );
   }
 
-  const transport = createAramexSoapTransport({
-    endpoint,
-    fetchImpl,
-    timeoutMs
-  });
+  const transport = createAramexSoapTransport({ endpoint, fetchImpl, timeoutMs });
+  // Tracking is a different Aramex service URL. Created only when the URL is known,
+  // so booking works before the tracking URL is.
+  const trackingTransport = trackingEndpoint
+    ? createAramexSoapTransport({ endpoint: trackingEndpoint, fetchImpl, timeoutMs })
+    : null;
 
-  function clientInfo() {
+  // Tracking ClientInfo has NO Source element (see the tracking WSDL).
+  function clientInfo({ withSource = true } = {}) {
     return {
       UserName: username,
       Password: password,
@@ -172,8 +291,26 @@ function createAramexClient(config = {}) {
       AccountPin: accountPin || '',
       AccountEntity: accountEntity || '',
       AccountCountryCode: accountCountryCode || '',
-      Source: source
+      ...(withSource && { Source: source })
     };
+  }
+
+  // Runs a transport call and converts transport errors to AramexApiError.
+  async function call(transportToUse, operation, wrapper, request) {
+    try {
+      return await transportToUse.call(operation, wrapper, request);
+    } catch (error) {
+      if (error instanceof AramexSoapError) {
+        throw new AramexApiError(error.message, {
+          operation: error.operation,
+          status: error.status,
+          body: error.body,
+          code: error.code,
+          outcomeUnknown: error.outcomeUnknown
+        });
+      }
+      throw error;
+    }
   }
 
   return {
@@ -191,17 +328,15 @@ function createAramexClient(config = {}) {
         ...(paymentType && { paymentType }),
         ...(paymentOptions != null && { paymentOptions }),
         ...(dimensionsCm && { dimensionsCm }),
+        useForeignHawb,
         fallbackPhone: warehousePhone,
         fallbackEmail: warehouseEmail
       });
       const returnId = returnShipment.returnId;
 
-
       const request = {
         ClientInfo: clientInfo(),
-        Transaction: {
-          Reference1: returnId || ''
-        },
+        Transaction: transaction(returnId),
         Shipments: {
           Shipment: [shipment]
         },
@@ -234,6 +369,7 @@ function createAramexClient(config = {}) {
           throw new AramexApiError(failureMessage, {
             operation: 'CreateShipments',
             code: 'carrier_rejected',
+            notifications,
             body: result
           });
         }
@@ -281,12 +417,96 @@ function createAramexClient(config = {}) {
       }
     },
 
-    // Tracking uses a separate Aramex service contract and will be integrated separately.
-    async trackShipments() {
-      throw new AramexApiError(
-        'Aramex tracking SOAP service has not been configured yet',
-        { operation: 'TrackShipments' }
-      );
+    /**
+     * Step 2 of a return: ask Aramex to collect the parcel from the customer.
+     * Needs the AWB from createReturnShipment. Separate from the booking on purpose:
+     * a failed pickup never undoes a booked shipment, it is retried / reviewed.
+     */
+    async createPickup(returnShipment = {}, { awb } = {}) {
+      const window = computePickupWindow(now(), { utcOffsetMinutes, ...pickupWindow });
+      const pickup = buildPickup(returnShipment, {
+        awb,
+        accountEntity,
+        window,
+        ...(productGroup && { productGroup }),
+        ...(productType && { productType }),
+        ...(paymentType && { paymentType }),
+        ...(dimensionsCm && { dimensionsCm }),
+        ...(pickupLocation && { location: pickupLocation }),
+        ...(pickupVehicle && { vehicle: pickupVehicle }),
+        fallbackEmail: warehouseEmail
+      });
+
+      const xml = await call(transport, 'CreatePickup', 'PickupCreationRequest', {
+        ClientInfo: clientInfo(),
+        Transaction: transaction(returnShipment.returnId),
+        Pickup: pickup,
+        LabelInfo: { ReportID: 9201, ReportType: 'URL' }
+      });
+
+      const result = parsePickupCreationResponse(xml);
+      const reasons = describeNotifications(result.Notifications);
+      const failureMessage =
+        'Aramex CreatePickup returned an unsuccessful response' + (reasons ? `: ${reasons}` : '');
+
+      if (result.HasErrors === true) {
+        throw new AramexApiError(failureMessage, {
+          operation: 'CreatePickup',
+          code: 'carrier_rejected',
+          notifications: result.Notifications,
+          body: result
+        });
+      }
+      if (result.HasErrors !== false || !result.ProcessedPickup?.ID) {
+        throw new AramexApiError(failureMessage, {
+          operation: 'CreatePickup',
+          code: 'incomplete_response',
+          outcomeUnknown: true,
+          notifications: result.Notifications,
+          body: result
+        });
+      }
+
+      return {
+        pickupId: result.ProcessedPickup.ID,
+        pickupGuid: result.ProcessedPickup.GUID,
+        pickupDate: window.pickupDate,
+        readyTime: window.readyTime,
+        notifications: result.Notifications
+      };
+    },
+
+    /**
+     * Latest tracking status for up to ~50 AWBs in one call.
+     * Returns { results: { AWB: [TrackingResult...] } }. An AWB Aramex does not know
+     * is simply absent / empty: that means "nothing yet", not an error.
+     */
+    async trackShipments(awbs = [], { lastOnly = true } = {}) {
+      if (!trackingTransport) {
+        throw new AramexApiError('Aramex tracking endpoint (ARAMEX_TRACKING_ENDPOINT) is not configured', {
+          operation: 'TrackShipments',
+          code: 'not_configured'
+        });
+      }
+      const list = [...new Set(awbs.map(String).filter(Boolean))];
+      if (list.length === 0) return { results: {}, notifications: [] };
+
+      const xml = await call(trackingTransport, 'TrackShipments', 'ShipmentTrackingRequest', {
+        ClientInfo: clientInfo({ withSource: false }),
+        Transaction: transaction(),
+        // .NET string array: every <string> carries the Arrays namespace.
+        Shipments: { string: list.map((awb) => ({ '@xmlns': ARRAYS_NAMESPACE, '#text': awb })) },
+        GetLastTrackingUpdateOnly: Boolean(lastOnly)
+      });
+
+      const result = parseTrackingResponse(xml);
+      if (result.HasErrors === true) {
+        throw new AramexApiError(
+          `Aramex TrackShipments returned errors: ${describeNotifications(result.Notifications)}`,
+          { operation: 'TrackShipments', code: 'carrier_rejected', notifications: result.Notifications, body: result }
+        );
+      }
+      return { results: result.results, notifications: result.Notifications };
     },
 
     // Shipment retrieval requires its own verified SOAP request contract.
@@ -297,7 +517,7 @@ function createAramexClient(config = {}) {
       );
     },
 
-    normalizeEvent
+    normalizeEvent: (raw) => normalizeEvent(raw, { statusMap, heuristics: statusHeuristics, utcOffsetMinutes })
   };
 }
 
@@ -309,5 +529,8 @@ module.exports = {
   AramexContractError,
   AramexApiError,
   STATUS_EVENT_MAP,
-  parseShipmentCreationResponse
+  parseShipmentCreationResponse,
+  parsePickupCreationResponse,
+  parseTrackingResponse,
+  transaction
 };

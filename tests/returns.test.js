@@ -353,3 +353,91 @@ test('a dry-run booking never touches the status record', async () => {
   await orchestrator.onReturnApproved(approvedPayload);
   assert.equal(calls.length, 0);
 });
+// --- Manual-review tagging wiring ---
+
+const { createManualReviewQueue } = require('../src/manual-review');
+
+function taggingQueue({ failTag = false } = {}) {
+  const tagged = [];
+  const queue = createManualReviewQueue({
+    shopify: {
+      async addOrderTags(orderId, tags) {
+        if (failTag) throw new Error('tagsAdd failed: Access denied');
+        tagged.push({ orderId, tags });
+      }
+    },
+    logger: { warn() { }, error() { } }
+  });
+  return { queue, tagged };
+}
+
+test('a manual-review case tags the right order with the reason', async () => {
+  const { queue, tagged } = taggingQueue();
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['Paytabs'] }), carriers: {}, manualReviewQueue: queue
+  });
+
+  await orchestrator.onReturnApproved(approvedPayload);
+
+  assert.equal(tagged.length, 1);
+  assert.equal(tagged[0].orderId, 'gid://shopify/Order/9');
+  assert.deepEqual(tagged[0].tags, ['manual_review', 'manual_review:no_carrier_tag']);
+});
+
+test('a failed tag is saved on the job and does not undo the review', async () => {
+  const jobStore = createMemoryJobStore();
+  const { queue } = taggingQueue({ failTag: true });
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['Paytabs'] }), carriers: {}, jobStore, manualReviewQueue: queue
+  });
+
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
+
+  assert.equal(results[0].action, 'manual_review');
+  const job = await jobStore.get(`rfo:${DEFAULT_RFO}`);
+  assert.equal(job.status, 'manual_review');
+  assert.match(job.manualReviewTagError, /Access denied/);
+});
+
+test('a Shopify write-back failure after booking is tagged and keeps the tracking number', async () => {
+  const jobStore = createMemoryJobStore();
+  const { queue, tagged } = taggingQueue();
+  const shopify = fakeShopify({ tags: ['RedBox'] });
+  shopify.createReverseDeliveryWithShipping = async () => { throw new Error('reverseDeliveryCreateWithShipping failed'); };
+  const orchestrator = createReturnOrchestrator({
+    shopify, carriers: { redbox: fakeCarrier('redbox') }, jobStore, manualReviewQueue: queue
+  });
+
+  const { results } = await orchestrator.onReturnApproved(approvedPayload);
+
+  assert.equal(results[0].reason, 'shopify_writeback_failed');
+  assert.equal(results[0].trackingNumber, 'TRK1');
+  assert.deepEqual(tagged[0].tags, ['manual_review', 'manual_review:shopify_writeback_failed']);
+  const job = await jobStore.get(`rfo:${DEFAULT_RFO}`);
+  // The job stays "booked" (not manual_review) so retryPending() can finish the write-back by itself.
+  assert.equal(job.status, 'booked');
+  assert.equal(job.writebackStatus, 'failed');
+  assert.equal(job.trackingNumber, 'TRK1');
+});
+
+test('a booking failure is tagged and does not take a shipment', async () => {
+  const { queue, tagged } = taggingQueue();
+  const broken = { name: 'redbox', async createReturnShipment() { throw new Error('401 Unauthorized'); } };
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['RedBox'] }), carriers: { redbox: broken }, manualReviewQueue: queue
+  });
+
+  await assert.rejects(() => orchestrator.onReturnApproved(approvedPayload), /401/);
+  assert.deepEqual(tagged[0].tags, ['manual_review', 'manual_review:booking_failed']);
+});
+
+test('a return with no reverse fulfillment order is tagged using the order from Shopify', async () => {
+  const { queue, tagged } = taggingQueue();
+  const orchestrator = createReturnOrchestrator({
+    shopify: fakeShopify({ tags: ['RedBox'], rfoIds: [] }), carriers: {}, manualReviewQueue: queue
+  });
+
+  await orchestrator.onReturnApproved({ admin_graphql_api_id: 'gid://shopify/Return/1' }); // payload has no order id
+
+  assert.equal(tagged[0].orderId, 'gid://shopify/Order/9');
+});
