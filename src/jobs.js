@@ -29,6 +29,9 @@ function createMemoryJobStore() {
         },
         async list() {
             return [...jobs.values()];
+        },
+        async remove(key) {
+            return jobs.delete(key);
         }
     };
 }

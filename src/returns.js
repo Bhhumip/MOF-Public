@@ -8,6 +8,28 @@ function resolveReturnCarrier(returnData = {}, options = {}) {
   return resolveCarrierFromTags(returnData.tags, options);
 }
 
+
+const COMPLETED_TAG = 'Return-Completed';
+const RFO_GID = /^gid:\/\/shopify\/ReverseFulfillmentOrder\/\d+$/;
+
+// The dispose webhook carries the reverse fulfillment order somewhere in its body. The exact
+// shape is not guaranteed, so look for the GID (or a numeric reverse_fulfillment_order_id).
+function findReverseFulfillmentOrderId(node, depth = 0) {
+  if (!node || depth > 4) return null;
+  if (typeof node === 'string') return RFO_GID.test(node) ? node : null;
+  if (typeof node !== 'object') return null;
+  if (node.reverse_fulfillment_order_id !== undefined) {
+    const id = String(node.reverse_fulfillment_order_id);
+    if (RFO_GID.test(id)) return id;
+    if (/^\d+$/.test(id)) return `gid://shopify/ReverseFulfillmentOrder/${id}`;
+  }
+  for (const value of Object.values(node)) {
+    const found = findReverseFulfillmentOrderId(value, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
 function createReturnOrchestrator({
   resolve = resolveReturnCarrier,
   shopify = null,
@@ -651,8 +673,47 @@ function createReturnOrchestrator({
       return { status: 'processed', returnId: payload.admin_graphql_api_id || payload.id };
     },
 
-    async onReverseFulfillmentOrderDisposed(payload) {
-      return { status: 'disposed', reverseFulfillmentOrderId: payload.id };
+    // Staff restocked or disposed the returned goods in Shopify. We re-read the real state from
+    // Shopify (not the webhook body), so a repeated or out-of-order webhook gives the same result.
+    async onReverseFulfillmentOrderDisposed(payload = {}) {
+      const reverseFulfillmentOrderId = findReverseFulfillmentOrderId(payload);
+      if (!reverseFulfillmentOrderId) {
+        console.warn(`[dispose] no reverse fulfillment order id found in the payload (keys: ${Object.keys(payload || {}).join(', ')})`);
+        return { status: 'ignored', reason: 'no_rfo_id' };
+      }
+      const key = `rfo:${reverseFulfillmentOrderId}`;
+      const job = await jobStore.get(key);
+      if (!job) return { status: 'ignored', reason: 'not_our_job', reverseFulfillmentOrderId };
+      if (!shopify?.getReverseFulfillmentDispositions) return { status: 'ignored', reason: 'shopify_unavailable', reverseFulfillmentOrderId };
+
+      const summary = await shopify.getReverseFulfillmentDispositions(reverseFulfillmentOrderId);
+      if (!summary) return { status: 'ignored', reason: 'rfo_not_found', reverseFulfillmentOrderId };
+
+      const patch = {
+        dispositionStatus: summary.complete ? 'complete' : 'partial',
+        dispositionTotal: summary.total,
+        dispositionDisposed: summary.disposed,
+        dispositionByType: summary.byType,
+        dispositionAt: new Date().toISOString()
+      };
+      if (summary.complete) {
+        patch.awaitingInspection = false;
+        if (job.needsAttention === 'returned') patch.needsAttention = null; // only the "arrived, please inspect" flag
+      }
+      await jobStore.update(key, patch);
+
+      // Tag once, so staff can filter finished returns. A tagging failure never undoes the record above.
+      if (summary.complete && !job.completionTagged && job.orderId) {
+        try {
+          await shopify.addOrderTags(job.orderId, [COMPLETED_TAG]);
+          await jobStore.update(key, { completionTagged: true });
+        } catch (error) {
+          console.error(`[dispose] ${key}: could not tag the order: ${error.message}`);
+        }
+      }
+      console.log(`[dispose] ${key}: ${summary.complete ? 'complete' : 'partial'} (${summary.disposed}/${summary.total} disposed)`);
+      return { status: summary.complete ? 'complete' : 'partial', reverseFulfillmentOrderId, ...summary };
+
     },
 
     // Direct HTTP entry point (kept for manual/testing use).

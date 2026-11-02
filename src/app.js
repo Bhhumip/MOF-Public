@@ -16,6 +16,7 @@ const { buildCarriers } = require('./carriers/factory');
 const { createTrackingSync } = require('./tracking-sync');
 const { createPoller } = require('./poller');
 const { createLogger } = require('./logger');
+const { createCleanup } = require('./cleanup');
 function createServer({ config = getConfig(), jobStore: injectedJobStore } = {}) {
   const shopify = createShopifyClient(config.shopify);
   const manualReviewQueue = createManualReviewQueue({
@@ -95,6 +96,9 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
   const canTrack = config.carrierMode !== 'dry-run' && typeof aramex?.trackShipments === 'function' &&
     config.carriers.aramex.trackingMode === 'poll' && Boolean(config.carriers.aramex.trackingEndpoint);
   const trackingSync = canTrack ? createTrackingSync({ jobStore, carrier: aramex, statusSync, logger }) : null;
+  const cleanup = config.cleanup?.enabled && typeof jobStore.remove === 'function'
+    ? createCleanup({ jobStore, ...config.cleanup, logger })
+    : null;
   const poller = config.pollerEnabled && config.carrierMode !== 'dry-run'
     ? createPoller({
       intervalMs: config.carriers.aramex.pollIntervalMs,
@@ -106,6 +110,11 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
         if (config.reconcile.enabled) {
           const reconciled = await returns.reconcileMissing({ lookbackHours: config.reconcile.lookbackHours });
           if (reconciled.found || reconciled.errors) logger.info('reconcile cycle', reconciled);
+        }
+        // Throttled inside runOnce (once an hour), so it is cheap to call on every cycle.
+        if (cleanup) {
+          const cleaned = await cleanup.runOnce();
+          if (cleaned.deleted || cleaned.wouldDelete || cleaned.errors) logger.info('cleanup cycle', cleaned);
         }
       }
     })
@@ -173,7 +182,8 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
   });
   server.poller = poller;
   server.jobStore = jobStore;
-  server.poller = poller;
+  server.returns = returns;
+
 
   server.on('close', () => {
     poller?.stop();

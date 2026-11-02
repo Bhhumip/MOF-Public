@@ -28,6 +28,7 @@ function createSqliteJobStore(filePath = ':memory:') {
     const select = db.prepare('SELECT * FROM return_jobs WHERE key = ?');
     const update = db.prepare('UPDATE return_jobs SET data = ?, status = ?, updated_at = ? WHERE key = ?');
     const all = db.prepare('SELECT * FROM return_jobs ORDER BY created_at, key');
+    const remove = db.prepare('DELETE FROM return_jobs WHERE key = ?');
 
     function toJob(row) {
         if (!row) return null;
@@ -61,6 +62,9 @@ function createSqliteJobStore(filePath = ':memory:') {
         },
         async list() {
             return all.all().map(toJob);
+        },
+        async remove(key) {
+            return remove.run(key).changes === 1;
         },
         close() {
             db.close();

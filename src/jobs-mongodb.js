@@ -195,6 +195,12 @@ function createMongoJobStore({
 
             return documents.map(toJob);
         },
+        // Deletes one job (used by the cleanup job). Returns true when a row was removed.
+        async remove(key) {
+            const collection = await getCollection();
+            const result = await collection.deleteOne({ key });
+            return result.deletedCount === 1;
+        },
 
         // Ensures concurrent close() calls wait for the same shutdown operation.
         close() {

@@ -336,12 +336,31 @@ function createShopifyClient({ storeDomain, adminAccessToken, apiVersion, fetchI
     return { restocked: dispositionInputs.length };
   }
 
+  // How much of a reverse fulfillment order has been dispositioned (restocked, not restocked, ...).
+  // Returns null when Shopify does not know the order.
+  async function getReverseFulfillmentDispositions(reverseFulfillmentOrderId) {
+    const data = await query(GET_RFO_LINE_ITEMS, { id: reverseFulfillmentOrderId });
+    const nodes = data.reverseFulfillmentOrder?.lineItems?.nodes;
+    if (!nodes) return null;
+    const byType = {};
+    let total = 0;
+    let disposed = 0;
+    for (const node of nodes) {
+      total += node.totalQuantity;
+      for (const disposition of node.dispositions || []) {
+        disposed += disposition.quantity;
+        byType[disposition.type] = (byType[disposition.type] || 0) + disposition.quantity;
+      }
+    }
+    return { total, disposed, byType, complete: total > 0 && disposed >= total };
+  }
+
   async function addOrderTags(orderId, tags) {
     const data = await query(ADD_TAGS, { id: toOrderGid(orderId), tags });
     const errors = data.tagsAdd.userErrors;
     if (errors?.length) throw new Error(`tagsAdd failed: ${errors.map((e) => e.message).join('; ')}`);
   }
-  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails, createReverseDeliveryWithShipping, upsertReturnShipmentRecord, linkReturnShipmentToOrder, restockReverseFulfillmentOrder, addOrderTags, listOpenReturns };
+  return { endpoint, query, getOrderShipping, getReturnContext, getReturnShipmentDetails, createReverseDeliveryWithShipping, upsertReturnShipmentRecord, linkReturnShipmentToOrder, restockReverseFulfillmentOrder, getReverseFulfillmentDispositions, addOrderTags, listOpenReturns };
 
 
   async function getReturnShipmentDetails(returnId) {

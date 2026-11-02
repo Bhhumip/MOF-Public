@@ -33,7 +33,7 @@ const DEFAULT_OPTIONS = Object.freeze({
     productGroup: 'DOM',   // Domestic. International would be EXP (see the manual, Appendix A)
     productType: 'OND',    // The only product type the manual lists for DOM
     paymentType: 'P',      // PLACEHOLDER: the payer rule is still to be confirmed with the client/Aramex
-    paymentOptions: '',
+    paymentOptions: 'ARCC',
     packageType: 'Box',
     // ASSUMPTION: a safe cut-off for free-text goods descriptions.
     maxDescriptionLength: 100
@@ -138,9 +138,24 @@ function buildShipment(returnShipment = {}, options = {}) {
     // The customer is the shipper (the parcel leaves them); the warehouse receives it.
     // Only the e-mail fallback applies to the customer; a missing customer phone
     // must go to manual review, because the courier cannot collect without it.
-    const shipper = toParty(returnShipment.customer, { email: fallback.email });
-    const consignee = toParty(returnShipment.warehouse, fallback);
+    // Aramex payment rule (manual): PaymentType C = payable by the consignee.
+    // ARCC needs Consignee.AccountNumber, ASCC needs Shipper.AccountNumber.
+    // Only fill the account number on the party Aramex expects, and only when
+    // someone other than the shipper-pays-cash case applies.
+    const payer = String(settings.paymentOptions || '').toUpperCase();
+    const account = clean(options.accountNumber);
+    const needsAccount = settings.paymentType === 'C' && account;
+    const shipperAccount = needsAccount && payer === 'ASCC' ? account : '';
+    const consigneeAccount = needsAccount && payer === 'ARCC' ? account : '';
 
+    const shipper = toParty(returnShipment.customer, {
+        email: fallback.email,
+        accountNumber: shipperAccount
+    });
+    const consignee = toParty(returnShipment.warehouse, {
+        ...fallback,
+        accountNumber: consigneeAccount
+    });
     const weightUnit = clean(returnShipment.weight?.unit).toUpperCase();
     const weightKg = weightUnit === 'KG' ? Number(returnShipment.weight?.value) : NaN;
 

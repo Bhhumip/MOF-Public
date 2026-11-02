@@ -83,6 +83,20 @@ function parseStatusMap(value) {
   return map;
 }
 
+function cleanup(env) {
+  const retentionDays = number(env.CLEANUP_RETENTION_DAYS, 30);
+  const eventRetentionDays = number(env.CLEANUP_EVENT_RETENTION_DAYS, 7);
+  // A finished job is also the duplicate guard: keep it longer than Shopify retries a webhook (48 h).
+  if (!(retentionDays >= 3)) throw new Error('CLEANUP_RETENTION_DAYS must be at least 3');
+  if (!(eventRetentionDays >= 1)) throw new Error('CLEANUP_EVENT_RETENTION_DAYS must be at least 1');
+  return {
+    enabled: env.CLEANUP_ENABLED === 'true',
+    dryRun: env.CLEANUP_DRY_RUN === 'true',
+    retentionDays,
+    eventRetentionDays
+  };
+}
+
 const number = (value, fallback) => (value === undefined || value === '' ? fallback : Number(value));
 
 function getConfig(env = process.env) {
@@ -134,6 +148,7 @@ function getConfig(env = process.env) {
       enabled: env.RECONCILE_ENABLED !== 'false',
       lookbackHours: number(env.RECONCILE_LOOKBACK_HOURS, 24)
     },
+    cleanup: cleanup(env),
 
     shopify: {
       storeDomain: env.SHOPIFY_STORE_DOMAIN,

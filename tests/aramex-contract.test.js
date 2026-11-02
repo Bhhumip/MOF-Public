@@ -137,3 +137,33 @@ test('every missing field is listed, so ops can see what to fix', () => {
             error.missing.includes('warehouse.address.line1')
     );
 });
+
+test('PaymentType C + ARCC puts the account number on the consignee only', () => {
+    const shipment = buildShipment(neutral(), {
+        ...fallbacks,
+        paymentType: 'C',
+        paymentOptions: 'ARCC',
+        accountNumber: '123456'
+    });
+    assert.equal(shipment.Consignee.AccountNumber, '123456');
+    assert.equal(shipment.Shipper.AccountNumber, '');
+    assert.equal(shipment.Details.PaymentType, 'C');
+    assert.equal(shipment.Details.PaymentOptions, 'ARCC');
+});
+
+test('PaymentType C + ASCC puts the account number on the shipper only', () => {
+    const shipment = buildShipment(neutral(), {
+        ...fallbacks,
+        paymentType: 'C',
+        paymentOptions: 'ASCC',
+        accountNumber: '123456'
+    });
+    assert.equal(shipment.Shipper.AccountNumber, '123456');
+    assert.equal(shipment.Consignee.AccountNumber, '');
+});
+
+test('no account number is sent on either party when the payer is the shipper (P)', () => {
+    const shipment = buildShipment(neutral(), { ...fallbacks, paymentType: 'P', accountNumber: '123456' });
+    assert.equal(shipment.Shipper.AccountNumber, '');
+    assert.equal(shipment.Consignee.AccountNumber, '');
+});

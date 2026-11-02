@@ -327,6 +327,7 @@ function createAramexClient(config = {}) {
         ...(productType && { productType }),
         ...(paymentType && { paymentType }),
         ...(paymentOptions != null && { paymentOptions }),
+        ...(accountNumber && { accountNumber }),
         ...(dimensionsCm && { dimensionsCm }),
         useForeignHawb,
         fallbackPhone: warehousePhone,
