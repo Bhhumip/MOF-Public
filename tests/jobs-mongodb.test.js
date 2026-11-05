@@ -20,10 +20,10 @@ test(
         try {
 
             const first = await store.claim('return-1', {
-                returnId: 'return-1'
+                returnId: 'rfo:test-1',
             });
 
-            const duplicate = await store.claim('return-1', {
+            const duplicate = await store.claim('rfo:test-1', {
                 returnId: 'different-return',
                 trackingNumber: 'SHOULD-NOT-BE-SAVED'
             });
@@ -32,7 +32,7 @@ test(
             assert.equal(duplicate.claimed, false);
 
             // A duplicate claim must return the original job data.
-            assert.equal(duplicate.job.returnId, 'return-1');
+            assert.equal(duplicate.job.returnId, 'rfo:test-1');
             assert.equal(duplicate.job.trackingNumber, undefined);
 
 
@@ -40,7 +40,7 @@ test(
             assert.equal(duplicate.claimed, false);
             assert.equal(duplicate.job.status, 'processing');
 
-            const updated = await store.update('return-1', {
+            const updated = await store.update('rfo:test-1', {
                 status: 'booked',
                 trackingNumber: 'TEST-123'
             });

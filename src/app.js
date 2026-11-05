@@ -151,18 +151,18 @@ function createServer({ config = getConfig(), jobStore: injectedJobStore } = {})
         return;
       }
 
-      if (request.url === '/returns' && request.method === 'POST') {
-        const body = await new Promise((resolve) => {
-          const chunks = [];
-          request.on('data', (chunk) => chunks.push(chunk));
-          request.on('end', () => resolve(Buffer.concat(chunks)));
-        });
-        const returnData = body.length ? JSON.parse(body.toString('utf8')) : {};
-        const result = await returns.handle(returnData);
-        response.writeHead(202, { 'Content-Type': 'application/json' });
-        response.end(JSON.stringify(result));
-        return;
-      }
+      // if (request.url === '/returns' && request.method === 'POST') {
+      //   const body = await new Promise((resolve) => {
+      //     const chunks = [];
+      //     request.on('data', (chunk) => chunks.push(chunk));
+      //     request.on('end', () => resolve(Buffer.concat(chunks)));
+      //   });
+      //   const returnData = body.length ? JSON.parse(body.toString('utf8')) : {};
+      //   const result = await returns.handle(returnData);
+      //   response.writeHead(202, { 'Content-Type': 'application/json' });
+      //   response.end(JSON.stringify(result));
+      //   return;
+      // }
 
       if (request.url === '/webhooks/redbox' && handleRedboxWebhook) {
         await handleRedboxWebhook(request, response);

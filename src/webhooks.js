@@ -1,9 +1,21 @@
 const { createHmac, timingSafeEqual } = require('node:crypto');
 
-function readBody(request) {
+// Shopify webhook bodies are small JSON documents. Anything near this size is not Shopify.
+const MAX_BODY_BYTES = 1024 * 1024;
+
+function readBody(request, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    request.on('data', (chunk) => chunks.push(chunk));
+    let size = 0;
+    request.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(Object.assign(new Error('payload too large'), { code: 'too_large' }));
+        request.destroy?.();
+        return;
+      }
+      chunks.push(chunk);
+    });
     request.on('end', () => resolve(Buffer.concat(chunks)));
     request.on('error', reject);
   });
@@ -44,7 +56,14 @@ function createWebhookHandler({ webhookSecret, orchestrator }) {
       return;
     }
 
-    const body = await readBody(request);
+    let body;
+    try {
+      body = await readBody(request);
+    } catch (error) {
+      response.writeHead(error.code === 'too_large' ? 413 : 400);
+      response.end();
+      return;
+    }
     const signature = request.headers['x-shopify-hmac-sha256'];
 
     if (!isValidSignature(body, signature, webhookSecret)) {
